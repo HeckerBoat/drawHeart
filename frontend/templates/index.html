@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>动态心形 · Draw Heart</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
+</head>
+<body>
+    <canvas id="heart-canvas"></canvas>
+
+    <!-- 顶部标题 -->
+    <div class="brand">
+        <span class="brand-dot">❤</span>
+        <span class="brand-text">Draw Heart · 动态心形</span>
+    </div>
+
+    {% if readonly %}
+    <!-- 只读分享模式：不渲染控制面板，仅显示只读标识 -->
+    <div class="share-badge">分享链接 · 仅供观赏，无法修改参数</div>
+    {% else %}
+    <!-- 控制面板 -->
+    <aside class="panel" id="control-panel">
+        <div class="panel-header">
+            <span>参数设置</span>
+            <button class="collapse-btn" id="collapse-btn" title="折叠/展开">—</button>
+        </div>
+        <div class="panel-body" id="panel-body">
+            <div class="form-row">
+                <label for="particle_count">粒子数量</label>
+                <input type="range" id="particle_count" min="200" max="2500" step="50" />
+                <span class="val" id="particle_count_val"></span>
+            </div>
+            <div class="form-row">
+                <label for="particle_size">粒子大小</label>
+                <input type="range" id="particle_size" min="0.5" max="6" step="0.1" />
+                <span class="val" id="particle_size_val"></span>
+            </div>
+            <div class="form-row">
+                <label for="beat_speed">跳动速度</label>
+                <input type="range" id="beat_speed" min="0.2" max="3" step="0.1" />
+                <span class="val" id="beat_speed_val"></span>
+            </div>
+            <div class="form-row">
+                <label for="spread_ratio">扩散系数</label>
+                <input type="range" id="spread_ratio" min="0.5" max="2" step="0.05" />
+                <span class="val" id="spread_ratio_val"></span>
+            </div>
+            <div class="form-row">
+                <label for="heart_color">心形颜色</label>
+                <input type="color" id="heart_color" />
+            </div>
+            <div class="form-row">
+                <label for="background_color">背景颜色</label>
+                <input type="color" id="background_color" />
+            </div>
+            <div class="form-row">
+                <label for="text_content">显示文字</label>
+                <input type="text" id="text_content" maxlength="64" />
+            </div>
+            <div class="form-row">
+                <label for="text_color">文字颜色</label>
+                <input type="color" id="text_color" />
+            </div>
+            <div class="form-row switch-row">
+                <label for="show_text">显示文字</label>
+                <input type="checkbox" id="show_text" />
+            </div>
+            <div class="form-actions">
+                <button id="save-btn" class="btn primary">保存配置</button>
+                <button id="reset-btn" class="btn">重置</button>
+            </div>
+            <div class="form-actions">
+                <button id="share-btn" class="btn share">🔗 生成分享链接</button>
+            </div>
+            <div class="share-row" id="share-row" hidden>
+                <input type="text" id="share-url" readonly title="点击全选复制" />
+            </div>
+            <div class="hint" id="share-hint"></div>
+            <div class="hint">参数自动保存到数据库，刷新后仍然生效。</div>
+        </div>
+    </aside>
+    {% endif %}
+
+    <!-- 鼠标提示 -->
+    <div class="tip">移动鼠标试试，会撒出小心形</div>
+
+    <script>
+        // 页面模式：edit（可编辑主页）/ share（只读分享页）
+        window.PAGE_MODE = "{{ 'share' if readonly else 'edit' }}";
+        {% if readonly %}
+        // 分享页 token：从当前路径 /s/<token> 解析
+        window.SHARE_TOKEN = location.pathname.split("/s/")[1] || "";
+        {% endif %}
+    </script>
+    <script src="{{ url_for('static', filename='js/heart.js') }}"></script>
+</body>
+</html>
