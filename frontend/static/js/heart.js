@@ -1,22 +1,23 @@
 /**
- * 动态心形图案 - 核心动画逻辑（3D 心形版）
+ * 3D 心形粒子动画 - Three.js 版
  *
  * 视觉构成：
- * 1. 3D 心形参数方程（沿 Y 轴旋转的心形曲面）
- * 2. 透视投影：近大远小，带深度雾化
- * 3. 自动旋转：绕 Y 轴持续旋转，速度可调
- * 4. 鼠标交互：移动洒落星光小爱心，点击绽放
- * 5. 柔光精灵预渲染：发光点与爱心烘焙到离屏画布，运行时仅 drawImage
+ * 1. THREE.Shape + ExtrudeGeometry 生成真正的 3D 心形几何体
+ * 2. MeshSurfaceSampler 从心脏表面均匀采样粒子点
+ * 3. 粒子跟随心脏脉动，带 Simplex 噪声自然蠕动
+ * 4. OrbitControls 鼠标交互旋转/缩放
+ * 5. 鼠标移动洒落星光、点击绽放爱心
  * 6. 与后端配置同步：从 /api/config 读取参数，修改后保存
  */
+import * as THREE from "three";
+import { MeshSurfaceSampler } from "three/addons/math/MeshSurfaceSampler.js";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
 (function () {
     "use strict";
 
-    // 页面模式：edit=可编辑主页；share=只读分享页（无控制面板，禁止保存参数）
+    // 页面模式：edit=可编辑主页；share=只读分享页
     const IS_SHARE = window.PAGE_MODE === "share";
-
-    const canvas = document.getElementById("heart-canvas");
-    const ctx = canvas.getContext("2d");
 
     // ============== 全局配置（与后端字段同名） ==============
     const cfg = {
@@ -33,540 +34,523 @@
         rotation_speed: 0.4,
     };
 
-    // ============== 画布尺寸 ==============
-    let W = 0, H = 0, DPR = Math.min(window.devicePixelRatio || 1, 2);
-
-    function resize() {
-        W = window.innerWidth;
-        H = window.innerHeight;
-        canvas.width = W * DPR;
-        canvas.height = H * DPR;
-        canvas.style.width = W + "px";
-        canvas.style.height = H + "px";
-        ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-        rebuildStars();
-    }
-    window.addEventListener("resize", resize);
-
     // ============== 颜色工具 ==============
     function hexToRgb(hex) {
         const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
         if (!m) return { r: 255, g: 111, b: 156 };
         return { r: parseInt(m[1], 16), g: parseInt(m[2], 16), b: parseInt(m[3], 16) };
     }
-    function rgbaStr(rgb, a) { return `rgba(${rgb.r},${rgb.g},${rgb.b},${a})`; }
-    function mixRgb(a, b, t) {
-        return {
-            r: Math.round(a.r + (b.r - a.r) * t),
-            g: Math.round(a.g + (b.g - a.g) * t),
-            b: Math.round(a.b + (b.b - a.b) * t),
-        };
+
+    /** 根据主色生成 4 色调色板（亮白→柔粉→主色→深红） */
+    function buildPalette(hex) {
+        const base = new THREE.Color(hex);
+        const light = base.clone().lerp(new THREE.Color(0xffffff), 0.6);
+        const pink = base.clone().lerp(new THREE.Color(0xffb6d5), 0.35);
+        const deep = base.clone().multiplyScalar(0.6);
+        return [light, pink, base, deep];
     }
 
-    // ============== 3D 心形参数方程 ==============
-    /**
-     * 3D 心形曲面参数方程
-     * x = 16 sin³(t)
-     * y = 13 cos(t) - 5 cos(2t) - 2 cos(3t) - cos(4t)
-     * z = z 方向厚度（用 u 参数控制，让心形沿 z 轴有体积）
-     */
-    function heart3D(t, u) {
-        const x = 16 * Math.pow(Math.sin(t), 3);
-        const y = 13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t);
-        // z 方向厚度：越靠近边缘越薄，中心最厚
-        const thickness = Math.sin(t) * 0.6 + 0.4;
-        const z = u * 10 * thickness;
-        return { x, y, z };
-    }
-
-    // 旋转矩阵（绕 Y 轴）
-    function rotateY(x, z, angle) {
-        const cos = Math.cos(angle);
-        const sin = Math.sin(angle);
-        return {
-            x: x * cos - z * sin,
-            z: x * sin + z * cos,
-        };
-    }
-
-    // 透视投影
-    function project(x, y, z, fov, scale) {
-        const depth = z + 35; // 把心形推到相机前方
-        const s = fov / Math.max(depth, 1);
-        return {
-            x: x * s * scale,
-            y: y * s * scale,
-            scale: s,
-            depth: depth,
-        };
-    }
-
-    // ============== 柔光精灵（离屏预烘焙） ==============
-    let sprites = null;
-    let spriteColor = "";
-
-    function makeGlowSprite(rgb) {
-        const S = 128;
-        const c = document.createElement("canvas");
-        c.width = c.height = S;
-        const g = c.getContext("2d");
-        const grd = g.createRadialGradient(S / 2, S / 2, 0, S / 2, S / 2, S / 2);
-        grd.addColorStop(0, rgbaStr(rgb, 0.95));
-        grd.addColorStop(0.22, rgbaStr(rgb, 0.42));
-        grd.addColorStop(0.55, rgbaStr(rgb, 0.12));
-        grd.addColorStop(1, rgbaStr(rgb, 0));
-        g.fillStyle = grd;
-        g.fillRect(0, 0, S, S);
-        return c;
-    }
-
-    function traceHeartPath(g, s) {
-        g.beginPath();
-        const step = 0.08;
-        for (let tt = 0; tt <= Math.PI * 2 + 0.001; tt += step) {
-            const pt = heart3D(tt, 0);
-            const x = pt.x * s;
-            const y = -pt.y * s;
-            if (tt === 0) g.moveTo(x, y);
-            else g.lineTo(x, y);
+    // ============== 简易 Simplex 噪声（内嵌，避免外部依赖） ==============
+    // 基于 Stefan Gustavson 的 simplex noise 精简实现
+    const SIMPLEX = (function () {
+        const grad3 = [
+            [1, 1, 0], [-1, 1, 0], [1, -1, 0], [-1, -1, 0],
+            [1, 0, 1], [-1, 0, 1], [1, 0, -1], [-1, 0, -1],
+            [0, 1, 1], [0, -1, 1], [0, 1, -1], [0, -1, -1],
+        ];
+        const p = new Uint8Array(512);
+        const perm = new Uint8Array(512);
+        const permMod12 = new Uint8Array(512);
+        for (let i = 0; i < 256; i++) p[i] = Math.floor(Math.random() * 256);
+        for (let i = 0; i < 512; i++) {
+            perm[i] = p[i & 255];
+            permMod12[i] = perm[i] % 12;
         }
-        g.closePath();
+        const F3 = 1 / 3, G3 = 1 / 6;
+        function noise3D(xin, yin, zin) {
+            let n0, n1, n2, n3;
+            const s = (xin + yin + zin) * F3;
+            const i = Math.floor(xin + s);
+            const j = Math.floor(yin + s);
+            const k = Math.floor(zin + s);
+            const t = (i + j + k) * G3;
+            const X0 = i - t, Y0 = j - t, Z0 = k - t;
+            const x0 = xin - X0, y0 = yin - Y0, z0 = zin - Z0;
+            let i1, j1, k1, i2, j2, k2;
+            if (x0 >= y0) {
+                if (y0 >= z0) { i1 = 1; j1 = 0; k1 = 0; i2 = 1; j2 = 1; k2 = 0; }
+                else if (x0 >= z0) { i1 = 1; j1 = 0; k1 = 0; i2 = 1; j2 = 0; k2 = 1; }
+                else { i1 = 0; j1 = 0; k1 = 1; i2 = 1; j2 = 0; k2 = 1; }
+            } else {
+                if (y0 < z0) { i1 = 0; j1 = 0; k1 = 1; i2 = 0; j2 = 1; k2 = 1; }
+                else if (x0 < z0) { i1 = 0; j1 = 1; k1 = 0; i2 = 0; j2 = 1; k2 = 1; }
+                else { i1 = 0; j1 = 1; k1 = 0; i2 = 1; j2 = 1; k2 = 0; }
+            }
+            const x1 = x0 - i1 + G3, y1 = y0 - j1 + G3, z1 = z0 - k1 + G3;
+            const x2 = x0 - i2 + 2 * G3, y2 = y0 - j2 + 2 * G3, z2 = z0 - k2 + 2 * G3;
+            const x3 = x0 - 1 + 3 * G3, y3 = y0 - 1 + 3 * G3, z3 = z0 - 1 + 3 * G3;
+            const ii = i & 255, jj = j & 255, kk = k & 255;
+            let t0 = 0.6 - x0 * x0 - y0 * y0 - z0 * z0;
+            if (t0 < 0) n0 = 0;
+            else {
+                t0 *= t0;
+                const gi0 = permMod12[ii + perm[jj + perm[kk]]];
+                n0 = t0 * t0 * (grad3[gi0][0] * x0 + grad3[gi0][1] * y0 + grad3[gi0][2] * z0);
+            }
+            let t1 = 0.6 - x1 * x1 - y1 * y1 - z1 * z1;
+            if (t1 < 0) n1 = 0;
+            else {
+                t1 *= t1;
+                const gi1 = permMod12[ii + i1 + perm[jj + j1 + perm[kk + k1]]];
+                n1 = t1 * t1 * (grad3[gi1][0] * x1 + grad3[gi1][1] * y1 + grad3[gi1][2] * z1);
+            }
+            let t2 = 0.6 - x2 * x2 - y2 * y2 - z2 * z2;
+            if (t2 < 0) n2 = 0;
+            else {
+                t2 *= t2;
+                const gi2 = permMod12[ii + i2 + perm[jj + j2 + perm[kk + k2]]];
+                n2 = t2 * t2 * (grad3[gi2][0] * x2 + grad3[gi2][1] * y2 + grad3[gi2][2] * z2);
+            }
+            let t3 = 0.6 - x3 * x3 - y3 * y3 - z3 * z3;
+            if (t3 < 0) n3 = 0;
+            else {
+                t3 *= t3;
+                const gi3 = permMod12[ii + 1 + perm[jj + 1 + perm[kk + 1]]];
+                n3 = t3 * t3 * (grad3[gi3][0] * x3 + grad3[gi3][1] * y3 + grad3[gi3][2] * z3);
+            }
+            return 32 * (n0 + n1 + n2 + n3);
+        }
+        return { noise3D };
+    })();
+
+    // ============== Three.js 场景搭建 ==============
+    const canvas = document.getElementById("heart-canvas");
+    let scene, camera, renderer, controls;
+    let heartGroup, particles, particleGeom, particleMat;
+    let sampler = null;
+    let basePositions = [];  // 粒子在心脏表面的基础位置（采样点）
+    let particleColors = []; // 每个粒子的颜色索引
+    let palette = [];
+    let flySprites = [];     // 鼠标飞散粒子（2D Canvas 叠加层）
+
+    function initThree() {
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(cfg.background_color);
+
+        camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(0, 0, 2.6);
+
+        renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+        renderer.setSize(window.innerWidth, window.innerHeight);
+
+        controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.08;
+        controls.enablePan = false;
+        controls.minDistance = 1.2;
+        controls.maxDistance = 6;
+        controls.autoRotate = false;
+
+        heartGroup = new THREE.Group();
+        scene.add(heartGroup);
     }
 
-    function makeHeartSprite(rgb) {
-        const S = 160;
-        const c = document.createElement("canvas");
-        c.width = c.height = S;
-        const g = c.getContext("2d");
-        g.translate(S / 2, S / 2 + 4);
-        const s = 2.7;
+    // ============== 创建 3D 心形几何体 ==============
+    function createHeartGeometry() {
+        const shape = new THREE.Shape();
+        // 经典心形贝塞尔曲线
+        shape.moveTo(0, 0.5);
+        shape.bezierCurveTo(0, 0.5, -0.3, 1.1, -1.1, 1.1);
+        shape.bezierCurveTo(-2.1, 1.1, -2.1, -0.1, -2.1, -0.1);
+        shape.bezierCurveTo(-2.1, -0.85, -1.4, -1.6, 0, -2.4);
+        shape.bezierCurveTo(1.4, -1.6, 2.1, -0.85, 2.1, -0.1);
+        shape.bezierCurveTo(2.1, -0.1, 2.1, 1.1, 1.1, 1.1);
+        shape.bezierCurveTo(0.4, 1.1, 0, 0.5, 0, 0.5);
 
-        traceHeartPath(g, s);
-        g.shadowColor = rgbaStr(rgb, 0.95);
-        g.shadowBlur = 26;
-        g.fillStyle = rgbaStr(rgb, 0.95);
-        g.fill();
-
-        g.shadowBlur = 0;
-        g.fill();
-
-        g.save();
-        traceHeartPath(g, s);
-        g.clip();
-        const hl = g.createRadialGradient(0, -s * 3, 0, 0, -s * 3, s * 13);
-        hl.addColorStop(0, "rgba(255,255,255,0.5)");
-        hl.addColorStop(0.5, "rgba(255,255,255,0.12)");
-        hl.addColorStop(1, "rgba(255,255,255,0)");
-        g.fillStyle = hl;
-        g.fillRect(-70, -70, 140, 140);
-        g.restore();
-        return c;
-    }
-
-    function ensureSprites() {
-        if (spriteColor === cfg.heart_color && sprites) return;
-        const main = hexToRgb(cfg.heart_color);
-        const light = mixRgb(main, { r: 255, g: 240, b: 246 }, 0.55);
-        sprites = {
-            glowMain: makeGlowSprite(main),
-            glowLight: makeGlowSprite(light),
-            glowWhite: makeGlowSprite({ r: 255, g: 255, b: 255 }),
-            heartMain: makeHeartSprite(main),
-            heartLight: makeHeartSprite(light),
-            heartWhite: makeHeartSprite(mixRgb(main, { r: 255, g: 255, b: 255 }, 0.75)),
+        const extrudeSettings = {
+            depth: 0.8,
+            bevelEnabled: true,
+            bevelSegments: 6,
+            steps: 4,
+            bevelSize: 0.25,
+            bevelThickness: 0.25,
+            curveSegments: 48,
         };
-        spriteColor = cfg.heart_color;
+
+        const geom = new THREE.ExtrudeGeometry(shape, extrudeSettings);
+        geom.center();
+        // shape 定义的心形本身就是圆弧朝上、尖端朝下，无需额外旋转
+        return geom;
     }
 
-    // ============== 背景渐变层缓存 ==============
-    let bgLayer = { key: "", canvas: null };
-    function ensureBackground() {
-        const key = W + "_" + H + "_" + cfg.background_color + "_" + cfg.heart_color;
-        if (bgLayer.key === key && bgLayer.canvas) return bgLayer.canvas;
+    // ============== 3D 文字（作为 heartGroup 子节点，固定在爱心正中央，随心脏一起旋转） ==============
+    let textMesh = null;
+    let textTexture = null;
+    let textCanvas2D = null;
+    let textFrontRatio = 1;  // 正面文字 em 高占纹理高度的比例（用于换算平面尺寸）
 
-        const c = document.createElement("canvas");
-        c.width = W * DPR;
-        c.height = H * DPR;
-        const g = c.getContext("2d");
-        g.setTransform(DPR, 0, 0, DPR, 0, 0);
+    function createTextTexture() {
+        if (!textCanvas2D) {
+            textCanvas2D = document.createElement("canvas");
+        }
+        const canvas = textCanvas2D;
+        const ctx = canvas.getContext("2d");
+        const text = cfg.text_content || "";
+        const fontSize = 96;
+        // 立体艺术字：英文用 Georgia 粗斜体（优雅衬线感），中文优先行楷/楷体
+        const font = `italic 900 ${fontSize}px Georgia, "Times New Roman", "STXingkai", "华文行楷", "KaiTi", "STKaiti", "Microsoft YaHei", sans-serif`;
 
-        const bg = hexToRgb(cfg.background_color);
-        const center = mixRgb(bg, { r: 255, g: 255, b: 255 }, 0.07);
-        const warm = mixRgb(bg, hexToRgb(cfg.heart_color), 0.22);
-        const grd = g.createRadialGradient(
-            W / 2, H * 0.44, 0,
-            W / 2, H * 0.5, Math.max(W, H) * 0.78
-        );
-        grd.addColorStop(0, rgbaStr(center, 1));
-        grd.addColorStop(0.5, rgbaStr(warm, 1));
-        grd.addColorStop(1, rgbaStr(bg, 1));
-        g.fillStyle = grd;
-        g.fillRect(0, 0, W, H);
+        ctx.font = font;
+        const textWidth = ctx.measureText(text).width;
 
-        bgLayer = { key, canvas: c };
-        return c;
+        // 挤出厚度（光从左上来，厚度向右下延伸）+ 发光留白
+        const depth = fontSize * 0.24;
+        const glowPad = fontSize * 0.55 + 12;
+        // 对称留白：保证正面字形居中于纹理，同时右下仍有空间容纳挤出与发光
+        const pad = glowPad + depth / 2;
+
+        canvas.width = Math.ceil(textWidth + pad * 2);
+        canvas.height = Math.ceil(fontSize + pad * 2);
+
+        // 改动 canvas 尺寸会重置上下文状态，需要重新设置
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.font = font;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.lineJoin = "round";
+        ctx.miterLimit = 2;
+
+        // 正面文字锚点即纹理中心（人眼以正面字形为定位基准，侧面为附属厚度）
+        const cx = canvas.width / 2;
+        const cy = canvas.height / 2;
+
+        const toCss = (c, a) => {
+            const r = Math.round(THREE.MathUtils.clamp(c.r, 0, 1) * 255);
+            const g = Math.round(THREE.MathUtils.clamp(c.g, 0, 1) * 255);
+            const b = Math.round(THREE.MathUtils.clamp(c.b, 0, 1) * 255);
+            return a === undefined ? `rgb(${r},${g},${b})` : `rgba(${r},${g},${b},${a})`;
+        };
+        const front = new THREE.Color(cfg.text_color);
+
+        // ① 挤出侧面：从最远（最暗）画到最近（较亮），多层连续渐变形成立体厚度
+        const sideDeep = front.clone().multiplyScalar(0.10);
+        const sideNear = front.clone().multiplyScalar(0.42);
+        const layers = 20;
+        for (let i = layers; i >= 1; i--) {
+            const t = i / layers;
+            ctx.fillStyle = toCss(sideNear.clone().lerp(sideDeep, t));
+            ctx.fillText(text, cx + depth * t, cy + depth * t * 0.92);
+        }
+
+        // ② 心形色外发光
+        ctx.save();
+        ctx.shadowColor = cfg.heart_color;
+        ctx.shadowBlur = fontSize * 0.5;
+        ctx.fillStyle = toCss(front);
+        ctx.fillText(text, cx, cy);
+        ctx.shadowBlur = fontSize * 0.22;
+        ctx.fillText(text, cx, cy);
+        ctx.restore();
+
+        // ③ 正面纵向渐变（上亮下暗，模拟受光圆柱面）
+        const faceGrad = ctx.createLinearGradient(0, cy - fontSize * 0.55, 0, cy + fontSize * 0.55);
+        faceGrad.addColorStop(0, toCss(front.clone().lerp(new THREE.Color(0xffffff), 0.85)));
+        faceGrad.addColorStop(0.42, toCss(front.clone().lerp(new THREE.Color(0xffffff), 0.12)));
+        faceGrad.addColorStop(0.58, toCss(front));
+        faceGrad.addColorStop(1, toCss(front.clone().multiplyScalar(0.6)));
+        ctx.fillStyle = faceGrad;
+        ctx.fillText(text, cx, cy);
+
+        // ④ 深色细描边，让文字轮廓更锐利
+        ctx.lineWidth = Math.max(2, fontSize * 0.025);
+        ctx.strokeStyle = toCss(front.clone().multiplyScalar(0.28), 0.9);
+        ctx.strokeText(text, cx, cy);
+
+        // ⑤ 顶部高光（玻璃/金属质感反光）
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(cx - textWidth / 2 - fontSize * 0.3, cy - fontSize,
+                 textWidth + fontSize * 0.6, fontSize * 0.62);
+        ctx.clip();
+        const hiGrad = ctx.createLinearGradient(0, cy - fontSize * 0.5, 0, cy + fontSize * 0.12);
+        hiGrad.addColorStop(0, "rgba(255,255,255,0)");
+        hiGrad.addColorStop(1, "rgba(255,255,255,0.7)");
+        ctx.fillStyle = hiGrad;
+        ctx.fillText(text, cx, cy);
+        ctx.restore();
+
+        // 记录正面 em 高占纹理比，供 rebuildText 换算平面尺寸
+        textFrontRatio = fontSize / canvas.height;
+
+        if (textTexture) {
+            textTexture.needsUpdate = true;
+        } else {
+            textTexture = new THREE.CanvasTexture(canvas);
+        }
+        return textTexture;
+    }
+
+    function rebuildText() {
+        if (!scene) return;
+
+        // 移除旧文字
+        if (textMesh) {
+            heartGroup.remove(textMesh);
+            textMesh.geometry.dispose();
+            textMesh.material.dispose();
+            textMesh = null;
+        }
+
+        if (!cfg.show_text || !cfg.text_content) return;
+
+        const texture = createTextTexture();
+        texture.colorSpace = THREE.SRGBColorSpace;
+        const aspect = textCanvas2D.width / textCanvas2D.height;
+
+        // 以正面文字 em 高 0.62 世界单位为基准，并限制最大宽度（心形宽约 4.2）
+        let planeHeight = 0.62 / textFrontRatio;
+        let planeWidth = planeHeight * aspect;
+        const maxWidth = 3.6;
+        if (planeWidth > maxWidth) {
+            planeWidth = maxWidth;
+            planeHeight = planeWidth / aspect;
+        }
+
+        const geom = new THREE.PlaneGeometry(planeWidth, planeHeight);
+        const mat = new THREE.MeshBasicMaterial({
+            map: texture,
+            transparent: true,
+            side: THREE.DoubleSide,
+            depthWrite: false,
+        });
+
+        textMesh = new THREE.Mesh(geom, mat);
+        // 文字固定在爱心视觉正中央：心形上宽下窄（两瓣+收尖），
+        // 视觉重心在包围盒中心偏上约 0.4 处；作为 heartGroup 子节点随心脏一起旋转
+        textMesh.position.set(0, 0.4, 0);
+        textMesh.renderOrder = 20;
+        heartGroup.add(textMesh);
     }
 
     // ============== 粒子系统 ==============
-    let particles3d = [];
-    let stars = [];
-    let embers = [];
-    let flyParticles = [];
-
-    function rebuildStars() {
-        stars = [];
-        const count = Math.min(190, Math.floor((W * H) / 8500));
-        for (let i = 0; i < count; i++) {
-            stars.push({
-                x: Math.random() * W,
-                y: Math.random() * H,
-                r: 0.4 + Math.random() * 1.2,
-                phase: Math.random() * Math.PI * 2,
-                tw: 0.4 + Math.random() * 1.4,
-                tint: Math.random() < 0.72 ? 2 : 1,
-            });
-        }
-    }
-
-    function rebuildEmbers() {
-        embers = [];
-        for (let i = 0; i < 38; i++) {
-            embers.push({
-                ph: Math.random(),
-                rise: 0.018 + Math.random() * 0.03,
-                ox: Math.random() * W,
-                sway: Math.random() * Math.PI * 2,
-                amp: 12 + Math.random() * 26,
-                size: 0.9 + Math.random() * 1.8,
-                tint: Math.random() < 0.55 ? 1 : (Math.random() < 0.7 ? 2 : 0),
-            });
-        }
-    }
-
     function rebuildParticles() {
-        particles3d = [];
+        if (!heartGroup) return;
+
+        // 清理旧粒子
+        if (particles) {
+            heartGroup.remove(particles);
+            particleGeom.dispose();
+            particleMat.dispose();
+        }
+
+        const heartGeom = createHeartGeometry();
+        const heartMesh = new THREE.Mesh(heartGeom, new THREE.MeshBasicMaterial({ visible: false }));
+        heartGroup.add(heartMesh);
+
+        // 从心脏表面采样粒子点
+        sampler = new MeshSurfaceSampler(heartMesh).build();
         const N = cfg.particle_count;
-        const glowTints = [0, 1, 2]; // 主色 / 柔粉 / 白
+        basePositions = new Float32Array(N * 3);
+        particleColors = new Float32Array(N * 3);
+
+        palette = buildPalette(cfg.heart_color);
+        const tmpPos = new THREE.Vector3();
 
         for (let i = 0; i < N; i++) {
-            const t = Math.random() * Math.PI * 2;
-            // u 控制 z 方向厚度：-1 到 1
-            const u = (Math.random() * 2 - 1) * (0.3 + Math.random() * 0.7);
-            const pos = heart3D(t, u);
+            sampler.sample(tmpPos);
+            basePositions[i * 3] = tmpPos.x;
+            basePositions[i * 3 + 1] = tmpPos.y;
+            basePositions[i * 3 + 2] = tmpPos.z;
 
-            const roll = Math.random();
-            particles3d.push({
-                t: t,
-                u: u,
-                x: pos.x,
-                y: pos.y,
-                z: pos.z,
-                // 沿曲面缓慢流动
-                flowSpeed: 0.05 + Math.random() * 0.15,
-                // 闪烁
-                phase: Math.random() * Math.PI * 2,
-                tw: 1.2 + Math.random() * 2.8,
-                sizeMul: 0.6 + Math.random() * 0.9,
-                base: 0.55 + Math.random() * 0.45,
-                tint: roll < 0.54 ? 0 : (roll < 0.91 ? 1 : 2),
-                // 随机偏移让表面更自然
-                offsetX: (Math.random() - 0.5) * 0.4,
-                offsetY: (Math.random() - 0.5) * 0.4,
-            });
+            const c = palette[Math.floor(Math.random() * palette.length)];
+            particleColors[i * 3] = c.r;
+            particleColors[i * 3 + 1] = c.g;
+            particleColors[i * 3 + 2] = c.b;
         }
-    }
 
-    function spawnFlyParticle(x, y) {
-        const angle = Math.random() * Math.PI * 2;
-        const speed = 0.6 + Math.random() * 1.8;
-        flyParticles.push({
-            x, y,
-            vx: Math.cos(angle) * speed,
-            vy: Math.sin(angle) * speed - 0.9,
-            rot: Math.random() * Math.PI * 2,
-            vr: (Math.random() - 0.5) * 2.4,
-            life: 1.0,
-            decay: 0.009 + Math.random() * 0.008,
-            size: 11 + Math.random() * 12,
-            phase: Math.random() * Math.PI * 2,
-            kind: Math.random() < 0.72 ? 0 : 1,
-            tint: Math.random() < 0.5 ? 0 : (Math.random() < 0.7 ? 1 : 2),
+        particleGeom = new THREE.BufferGeometry();
+        particleGeom.setAttribute("position", new THREE.BufferAttribute(new Float32Array(basePositions), 3));
+        particleGeom.setAttribute("color", new THREE.BufferAttribute(new Float32Array(particleColors), 3));
+
+        particleMat = new THREE.PointsMaterial({
+            size: cfg.particle_size * 0.012,
+            vertexColors: true,
+            transparent: true,
+            opacity: 0.95,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+            sizeAttenuation: true,
         });
-        if (flyParticles.length > 260) flyParticles.shift();
+
+        particles = new THREE.Points(particleGeom, particleMat);
+        heartGroup.add(particles);
+
+        // 清理临时 mesh（采样后不再需要几何体本身）
+        heartGroup.remove(heartMesh);
+        heartGeom.dispose();
     }
 
-    // ============== 心跳函数 ==============
-    function beatState(timeSec) {
+    // ============== 心跳动画 ==============
+    function beatScale(timeSec) {
         const T = 1.15;
         const phase = ((timeSec * cfg.beat_speed) % T) / T;
         const bump = (p, c, w) => Math.exp(-Math.pow((p - c) / w, 2));
-        const pulse = bump(phase, 0.09, 0.075) * 0.085 + bump(phase, 0.30, 0.095) * 0.05;
-        const breathe = Math.sin(timeSec * 0.8) * 0.015;
-        return { scale: 1 + pulse + breathe, pulse };
+        const pulse = bump(phase, 0.09, 0.075) * 0.12 + bump(phase, 0.30, 0.095) * 0.07;
+        const breathe = Math.sin(timeSec * 0.8) * 0.02;
+        return 1 + pulse + breathe;
     }
 
-    // ============== 绘制背景 ==============
-    function drawBackground() {
-        ctx.globalCompositeOperation = "source-over";
-        ctx.globalAlpha = 1;
-        ctx.fillStyle = cfg.background_color;
-        ctx.fillRect(0, 0, W, H);
-        ctx.drawImage(ensureBackground(), 0, 0, W, H);
-    }
-
-    // ============== 绘制闪烁星空 ==============
-    function drawStars(timeSec) {
-        ctx.globalCompositeOperation = "source-over";
-        const list = [sprites.glowMain, sprites.glowLight, sprites.glowWhite];
-        for (let i = 0; i < stars.length; i++) {
-            const s = stars[i];
-            const tw = Math.pow(0.5 + 0.5 * Math.sin(timeSec * s.tw + s.phase), 2);
-            const alpha = 0.12 + 0.6 * tw;
-            const d = s.r * (5 + tw * 3.5);
-            ctx.globalAlpha = alpha;
-            ctx.drawImage(list[s.tint], s.x - d / 2, s.y - d / 2, d, d);
-        }
-        ctx.globalAlpha = 1;
-    }
-
-    // ============== 绘制上升的许愿光点 ==============
-    function drawEmbers(timeSec, dt) {
-        ctx.globalCompositeOperation = "lighter";
-        const list = [sprites.glowMain, sprites.glowLight, sprites.glowWhite];
-        for (let i = 0; i < embers.length; i++) {
-            const e = embers[i];
-            e.ph -= dt * e.rise;
-            if (e.ph <= 0) {
-                e.ph = 1;
-                e.ox = Math.random() * W;
-                e.sway = Math.random() * Math.PI * 2;
-            }
-            const y = H * (1 - e.ph) + 12;
-            const x = e.ox + Math.sin(timeSec * 0.9 + e.sway) * e.amp;
-            const alpha = Math.sin(e.ph * Math.PI) * 0.7;
-            const d = e.size * 7.5;
-            ctx.globalAlpha = alpha;
-            ctx.drawImage(list[e.tint], x - d / 2, y - d / 2, d, d);
-        }
-        ctx.globalAlpha = 1;
-    }
-
-    // ============== 绘制 3D 心形 ==============
-    let rotAngle = 0;
-
-    function drawHeart3D(timeSec, dt) {
-        const cx = W / 2;
-        const cy = H / 2;
-        const baseScale = Math.min(W, H) / 45 * cfg.spread_ratio;
-        const beat = beatState(timeSec);
-        const fov = 60;
-
-        // 更新旋转角度
-        rotAngle += cfg.rotation_speed * dt;
-
-        ctx.globalCompositeOperation = "lighter";
-
-        // 心形整体光晕（2D 层，不旋转）
-        const haloD = baseScale * 30 * beat.scale;
-        ctx.globalAlpha = 0.10 + beat.pulse * 0.5;
-        ctx.drawImage(sprites.glowMain, cx - haloD / 2, cy - haloD / 2, haloD, haloD);
-        const haloD2 = baseScale * 15 * beat.scale;
-        ctx.globalAlpha = 0.06 + beat.pulse * 0.35;
-        ctx.drawImage(sprites.glowWhite, cx - haloD2 / 2, cy - haloD2 / 2, haloD2, haloD2);
-
-        // 预计算所有粒子的投影位置并排序
-        const projected = [];
-        const glowList = [sprites.glowMain, sprites.glowLight, sprites.glowWhite];
-
-        for (let i = 0; i < particles3d.length; i++) {
-            const p = particles3d[i];
-
-            // 沿曲面缓慢流动
-            p.t += p.flowSpeed * dt;
-            if (p.t > Math.PI * 2) p.t -= Math.PI * 2;
-
-            // 重新计算 3D 位置（带流动和心跳）
-            const pos = heart3D(p.t, p.u);
-            const x3 = (pos.x + p.offsetX) * beat.scale;
-            const y3 = (pos.y + p.offsetY) * beat.scale;
-            const z3 = pos.z * beat.scale;
-
-            // 绕 Y 轴旋转
-            const rot = rotateY(x3, z3, rotAngle);
-
-            // 透视投影
-            const proj = project(rot.x, y3, rot.z, fov, baseScale);
-
-            projected.push({
-                screenX: cx + proj.x,
-                screenY: cy - proj.y,
-                scale: proj.scale,
-                depth: proj.depth,
-                particle: p,
-            });
-        }
-
-        // 按深度排序：远的先画，近的后画（ painter's algorithm ）
-        projected.sort((a, b) => b.depth - a.depth);
-
-        // 绘制排序后的粒子
-        for (let i = 0; i < projected.length; i++) {
-            const item = projected[i];
-            const p = item.particle;
-
-            // 闪烁
-            const tw = Math.pow(0.5 + 0.5 * Math.sin(timeSec * p.tw + p.phase), 2.2);
-            const depthFade = Math.max(0.15, Math.min(1, 1.4 - item.depth / 60));
-            const alpha = p.base * (0.2 + 0.5 * tw) * depthFade;
-
-            // 大小随透视缩放
-            const d = cfg.particle_size * p.sizeMul * 6.5 * item.scale * beat.scale;
-
-            ctx.globalAlpha = alpha;
-            ctx.drawImage(
-                glowList[p.tint],
-                item.screenX - d / 2,
-                item.screenY - d / 2,
-                d,
-                d
-            );
-        }
-
-        ctx.globalAlpha = 1;
-        ctx.globalCompositeOperation = "source-over";
-    }
-
-    // ============== 绘制 2D 心形（兼容模式） ==============
-    function drawHeart2D(timeSec, dt) {
-        const cx = W / 2;
-        const cy = H / 2;
-        const scale = Math.min(W, H) / 40 * cfg.spread_ratio;
-        const beat = beatState(timeSec);
-
-        ctx.globalCompositeOperation = "lighter";
-
-        const haloD = scale * 34 * beat.scale;
-        ctx.globalAlpha = 0.12 + beat.pulse * 0.55;
-        ctx.drawImage(sprites.glowMain, cx - haloD / 2, cy - haloD / 2 + scale * 1.5, haloD, haloD);
-        const haloD2 = scale * 17 * beat.scale;
-        ctx.globalAlpha = 0.07 + beat.pulse * 0.4;
-        ctx.drawImage(sprites.glowWhite, cx - haloD2 / 2, cy - haloD2 / 2 + scale * 1.5, haloD2, haloD2);
-
-        const glowList = [sprites.glowMain, sprites.glowLight, sprites.glowWhite];
-
-        for (let i = 0; i < particles3d.length; i++) {
-            const p = particles3d[i];
-            p.t += p.flowSpeed * dt;
-            if (p.t > Math.PI * 2) p.t -= Math.PI * 2;
-
-            const pos = heart3D(p.t, 0);
-            const X = (pos.x + p.offsetX) * beat.scale;
-            const Y = (-pos.y + p.offsetY) * beat.scale;
-
-            const tw = Math.pow(0.5 + 0.5 * Math.sin(timeSec * p.tw + p.phase), 2.2);
-            const alpha = p.base * (0.2 + 0.5 * tw);
-            const d = cfg.particle_size * p.sizeMul * 7 * beat.scale;
-
-            ctx.globalAlpha = alpha;
-            ctx.drawImage(glowList[p.tint], cx + X * scale - d / 2, cy + Y * scale - d / 2, d, d);
-        }
-
-        ctx.globalAlpha = 1;
-        ctx.globalCompositeOperation = "source-over";
-    }
-
-    // ============== 绘制飞散的星光小爱心 ==============
-    function drawFlyParticles(timeSec, dt) {
-        ctx.globalCompositeOperation = "lighter";
-        const step = dt * 60;
-        const heartImgs = [sprites.heartMain, sprites.heartLight, sprites.heartWhite];
-        const glowImgs = [sprites.glowMain, sprites.glowLight, sprites.glowWhite];
-
-        for (let i = flyParticles.length - 1; i >= 0; i--) {
-            const f = flyParticles[i];
-            f.vy += 0.012 * step;
-            f.vx *= Math.pow(0.985, step);
-            f.vy *= Math.pow(0.992, step);
-            f.x += f.vx * step;
-            f.y += f.vy * step;
-            f.rot += f.vr * dt;
-            f.life -= f.decay * step;
-            if (f.life <= 0) {
-                flyParticles.splice(i, 1);
-                continue;
-            }
-
-            const twinkle = 0.65 + 0.35 * Math.sin(timeSec * 9 + f.phase);
-            ctx.globalAlpha = Math.max(0, f.life) * twinkle;
-
-            if (f.kind === 0) {
-                const d = f.size * (0.55 + 0.45 * f.life);
-                ctx.save();
-                ctx.translate(f.x, f.y);
-                ctx.rotate(f.rot);
-                ctx.drawImage(heartImgs[f.tint], -d / 2, -d / 2, d, d);
-                ctx.restore();
-            } else {
-                const d = f.size * 0.55 * (0.5 + 0.5 * f.life);
-                ctx.drawImage(glowImgs[f.tint], f.x - d / 2, f.y - d / 2, d, d);
-            }
-        }
-        ctx.globalAlpha = 1;
-        ctx.globalCompositeOperation = "source-over";
-    }
-
-    // ============== 绘制文字 ==============
-    function drawText(timeSec) {
-        if (!cfg.show_text || !cfg.text_content) return;
-        const cx = W / 2;
-        const cy = H / 2 + Math.min(W, H) * 0.19;
-        const rgb = hexToRgb(cfg.text_color);
-
-        const fade = 0.72 + Math.sin(timeSec * 1.2) * 0.28;
-
-        const fontSize = Math.max(16, Math.min(W, H) * 0.04);
-        ctx.font = `300 ${fontSize}px -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif`;
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-
-        ctx.shadowColor = rgbaStr(hexToRgb(cfg.heart_color), 0.75);
-        ctx.shadowBlur = 20;
-        ctx.fillStyle = rgbaStr(rgb, fade);
-        ctx.fillText(cfg.text_content, cx, cy);
-        ctx.shadowBlur = 0;
-    }
-
-    // ============== 主循环 ==============
+    // ============== 渲染循环 ==============
     let startTime = performance.now();
     let lastFrame = startTime;
-    function loop() {
+    const tmpVec = new THREE.Vector3();
+
+    function animate() {
+        requestAnimationFrame(animate);
         const now = performance.now();
         const t = (now - startTime) / 1000;
         const dt = Math.min(0.05, (now - lastFrame) / 1000);
         lastFrame = now;
 
-        ensureSprites();
-        drawBackground();
-        drawStars(t);
-        drawEmbers(t, dt);
+        if (particles) {
+            const scale = beatScale(t) * cfg.spread_ratio;
+            const positions = particleGeom.attributes.position.array;
+            const N = basePositions.length / 3;
 
-        if (cfg.depth_3d) {
-            drawHeart3D(t, dt);
-        } else {
-            drawHeart2D(t, dt);
+            for (let i = 0; i < N; i++) {
+                const bx = basePositions[i * 3];
+                const by = basePositions[i * 3 + 1];
+                const bz = basePositions[i * 3 + 2];
+
+                // Simplex 噪声驱动的表面蠕动
+                const noise = SIMPLEX.noise3D(bx * 1.5, by * 1.5, bz * 1.5 + t * 0.4);
+                const noise2 = SIMPLEX.noise3D(bx * 4, by * 4, bz * 4 + t * 0.8);
+
+                // 基础缩放 + 噪声扰动
+                const s = scale + noise * 0.04 * (1 + scale - 1);
+                const jitter = noise2 * 0.015;
+
+                positions[i * 3] = bx * s + jitter;
+                positions[i * 3 + 1] = by * s + jitter;
+                positions[i * 3 + 2] = bz * s + jitter;
+            }
+            particleGeom.attributes.position.needsUpdate = true;
+
+            // 心跳时整体脉冲缩放粒子大小
+            const pulse = Math.max(0, scale - 1);
+            particleMat.size = cfg.particle_size * 0.012 * (1 + pulse * 1.5);
         }
 
-        drawFlyParticles(t, dt);
-        drawText(t);
+        if (heartGroup && cfg.rotation_speed > 0) {
+            heartGroup.rotation.y += dt * cfg.rotation_speed * 0.5;
+        }
 
-        requestAnimationFrame(loop);
+        // 文字作为 heartGroup 子节点随心脏一起旋转，仅随心跳轻微脉动
+        if (textMesh) {
+            textMesh.scale.setScalar(1 + (beatScale(t) - 1) * 0.5);
+        }
+
+        controls.update();
+        renderer.render(scene, camera);
+
+        drawFlySprites(dt);
     }
+
+    // ============== 鼠标飞散粒子（2D Canvas 叠加层） ==============
+    const flyCanvas = document.createElement("canvas");
+    flyCanvas.style.cssText = "position:fixed;inset:0;width:100%;height:100%;pointer-events:none;z-index:5;";
+    document.body.appendChild(flyCanvas);
+    const flyCtx = flyCanvas.getContext("2d");
+
+    function resizeFlyCanvas() {
+        flyCanvas.width = window.innerWidth * (window.devicePixelRatio || 1);
+        flyCanvas.height = window.innerHeight * (window.devicePixelRatio || 1);
+        flyCanvas.style.width = window.innerWidth + "px";
+        flyCanvas.style.height = window.innerHeight + "px";
+        flyCtx.scale(window.devicePixelRatio || 1, window.devicePixelRatio || 1);
+    }
+    window.addEventListener("resize", resizeFlyCanvas);
+    resizeFlyCanvas();
+
+    function spawnFlyParticle(x, y) {
+        const angle = Math.random() * Math.PI * 2;
+        const speed = 0.8 + Math.random() * 2.2;
+        flySprites.push({
+            x, y,
+            vx: Math.cos(angle) * speed,
+            vy: Math.sin(angle) * speed - 1.2,
+            life: 1.0,
+            decay: 0.012 + Math.random() * 0.01,
+            size: 6 + Math.random() * 8,
+            phase: Math.random() * Math.PI * 2,
+            isHeart: Math.random() < 0.65,
+        });
+        if (flySprites.length > 300) flySprites.shift();
+    }
+
+    function drawFlySprites(dt) {
+        flyCtx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+        flyCtx.globalCompositeOperation = "lighter";
+        const rgb = hexToRgb(cfg.heart_color);
+        const step = dt * 60;
+
+        for (let i = flySprites.length - 1; i >= 0; i--) {
+            const f = flySprites[i];
+            f.vy += 0.015 * step;
+            f.vx *= Math.pow(0.985, step);
+            f.vy *= Math.pow(0.992, step);
+            f.x += f.vx * step;
+            f.y += f.vy * step;
+            f.life -= f.decay * step;
+            if (f.life <= 0) { flySprites.splice(i, 1); continue; }
+
+            const twinkle = 0.6 + 0.4 * Math.sin(performance.now() * 0.01 + f.phase);
+            flyCtx.globalAlpha = Math.max(0, f.life) * twinkle;
+
+            if (f.isHeart) {
+                drawMiniHeart(f.x, f.y, f.size * f.life, rgb);
+            } else {
+                const d = f.size * 2 * f.life;
+                const grd = flyCtx.createRadialGradient(f.x, f.y, 0, f.x, f.y, d);
+                grd.addColorStop(0, `rgba(255,255,255,${f.life})`);
+                grd.addColorStop(0.3, `rgba(${rgb.r},${rgb.g},${rgb.b},${f.life * 0.8})`);
+                grd.addColorStop(1, `rgba(${rgb.r},${rgb.g},${rgb.b},0)`);
+                flyCtx.fillStyle = grd;
+                flyCtx.beginPath();
+                flyCtx.arc(f.x, f.y, d, 0, Math.PI * 2);
+                flyCtx.fill();
+            }
+        }
+        flyCtx.globalAlpha = 1;
+        flyCtx.globalCompositeOperation = "source-over";
+    }
+
+    function drawMiniHeart(cx, cy, size, rgb) {
+        flyCtx.save();
+        flyCtx.translate(cx, cy);
+        flyCtx.fillStyle = `rgba(${rgb.r},${rgb.g},${rgb.b},${flyCtx.globalAlpha})`;
+        flyCtx.shadowColor = `rgba(${rgb.r},${rgb.g},${rgb.b},0.9)`;
+        flyCtx.shadowBlur = 12;
+        flyCtx.beginPath();
+        const s = size / 16;
+        flyCtx.moveTo(0, -4 * s);
+        flyCtx.bezierCurveTo(0, -4 * s, -8 * s, -12 * s, -8 * s, -2 * s);
+        flyCtx.bezierCurveTo(-8 * s, 4 * s, 0, 10 * s, 0, 12 * s);
+        flyCtx.bezierCurveTo(0, 10 * s, 8 * s, 4 * s, 8 * s, -2 * s);
+        flyCtx.bezierCurveTo(8 * s, -12 * s, 0, -4 * s, 0, -4 * s);
+        flyCtx.fill();
+        flyCtx.restore();
+    }
+
+
+
 
     // ============== 鼠标交互 ==============
     let lastSpawn = 0;
     window.addEventListener("mousemove", (e) => {
         const now = performance.now();
-        if (now - lastSpawn < 70) return;
+        if (now - lastSpawn < 60) return;
         lastSpawn = now;
         const n = 1 + Math.floor(Math.random() * 2);
         for (let i = 0; i < n; i++) {
@@ -574,9 +558,17 @@
         }
     });
     window.addEventListener("click", (e) => {
-        for (let i = 0; i < 24; i++) {
+        for (let i = 0; i < 28; i++) {
             spawnFlyParticle(e.clientX, e.clientY);
         }
+    });
+
+    // ============== 窗口缩放 ==============
+    window.addEventListener("resize", () => {
+        if (!camera || !renderer) return;
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
     });
 
     // ============== 控制面板交互 ==============
@@ -589,12 +581,11 @@
         const el = document.getElementById(id);
         const val = document.getElementById(id + "_val");
         if (!el || !val) return;
-        const update = () => {
-            val.textContent = el.value;
-        };
+        const update = () => { val.textContent = el.value; };
         el.addEventListener("input", () => {
             cfg[id] = parseFloat(el.value);
             if (id === "particle_count") rebuildParticles();
+            if (id === "background_color" && scene) scene.background = new THREE.Color(cfg.background_color);
             update();
             scheduleSave();
         });
@@ -607,6 +598,9 @@
         if (!el) return;
         el.addEventListener("input", () => {
             cfg[id] = el.value;
+            if (id === "heart_color") { rebuildParticles(); rebuildText(); }
+            if (id === "text_color") rebuildText();
+            if (id === "background_color" && scene) scene.background = new THREE.Color(cfg.background_color);
             scheduleSave();
         });
     });
@@ -616,6 +610,7 @@
         if (!el) return;
         el.addEventListener("input", () => {
             cfg[id] = el.value;
+            rebuildText();
             scheduleSave();
         });
     });
@@ -625,6 +620,7 @@
         if (!el) return;
         el.addEventListener("change", () => {
             cfg[id] = el.checked;
+            if (id === "show_text") rebuildText();
             scheduleSave();
         });
     });
@@ -686,9 +682,13 @@
 
     function applyServerConfig(data) {
         const countChanged = data.particle_count !== cfg.particle_count;
+        const colorChanged = data.heart_color !== cfg.heart_color;
+        const bgChanged = data.background_color !== cfg.background_color;
         Object.assign(cfg, data);
         applyCfgToUI();
-        if (countChanged) rebuildParticles();
+        if (countChanged || colorChanged) rebuildParticles();
+        if (bgChanged && scene) scene.background = new THREE.Color(cfg.background_color);
+        rebuildText();
     }
 
     if (IS_SHARE) {
@@ -700,9 +700,7 @@
                 if (json === lastServerCfgJson) return;
                 applyServerConfig(data);
                 lastServerCfgJson = json;
-            } catch (_) {
-                // 轮询失败静默跳过
-            }
+            } catch (_) { /* 轮询失败静默跳过 */ }
         }, SHARE_POLL_INTERVAL);
     }
 
@@ -746,7 +744,9 @@
             };
             Object.assign(cfg, defaults);
             applyCfgToUI();
+            if (scene) scene.background = new THREE.Color(cfg.background_color);
             rebuildParticles();
+            rebuildText();
             scheduleSave();
         });
     }
@@ -754,9 +754,7 @@
     // 显式保存按钮
     const saveBtn = document.getElementById("save-btn");
     if (saveBtn) {
-        saveBtn.addEventListener("click", () => {
-            saveConfig();
-        });
+        saveBtn.addEventListener("click", () => { saveConfig(); });
     }
 
     // ============== 生成分享链接 ==============
@@ -776,11 +774,7 @@
                 }
                 const fullUrl = data.data.url;
                 if (row) row.hidden = false;
-                if (input) {
-                    input.value = fullUrl;
-                    input.focus();
-                    input.select();
-                }
+                if (input) { input.value = fullUrl; input.focus(); input.select(); }
                 try {
                     await navigator.clipboard.writeText(fullUrl);
                     if (hint) hint.textContent = "链接已生成并复制，发送给朋友即可（对方只能观看，内容随本页设置实时变化）";
@@ -794,11 +788,11 @@
     }
 
     // ============== 启动 ==============
-    resize();
-    rebuildEmbers();
+    initThree();
     loadConfigFromServer().finally(() => {
-        ensureSprites();
+        scene.background = new THREE.Color(cfg.background_color);
         rebuildParticles();
-        loop();
+        rebuildText();
+        animate();
     });
 })();

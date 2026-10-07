@@ -1,15 +1,18 @@
 # Draw Heart
 
-A dynamic heart animation website built with Flask + Canvas. Deploy to any server and share the link with friends.
+A dynamic 3D heart particle animation website built with Flask + Three.js (WebGL). Deploy to any server and share the link with friends.
 
-Inspired by the classic heart parametric equation `x = 16 sin³(t), y = 13 cos(t) − 5 cos(2t) − 2 cos(3t) − cos(4t)`, rendered with a particle system, heartbeat rhythm, and mouse interaction.
+The heart geometry is generated in code with `THREE.Shape` + `ExtrudeGeometry`, and thousands of particles are sampled from the heart surface via `MeshSurfaceSampler`. Particles pulse with the heartbeat rhythm, drift naturally with Simplex noise, and the whole scene auto-rotates with `OrbitControls`.
 
 ## Features
 
-- **3D particle heart** — hundreds of glowing particles form a rotating 3D heart surface
+- **True 3D particle heart** — particles sampled from a real 3D heart mesh surface (not a 2D parametric curve)
 - **Heartbeat rhythm** — double-bump heartbeat curve makes the heart pulse naturally
+- **Simplex noise drift** — particles wiggle organically on the heart surface
+- **Auto-rotation & orbit controls** — the heart rotates automatically; drag to rotate, scroll to zoom
 - **Mouse interaction** — move the mouse to scatter small hearts; click for a burst
-- **Customizable** — color, particle count, beat speed, 3D rotation speed, text and more, all saved to SQLite
+- **3D art text** — the text is rendered as an extruded 3D art font centered in the heart, pulses gently with the heartbeat and rotates together with the heart
+- **Customizable** — color, particle count, beat speed, rotation speed, text and more, all saved to SQLite
 - **Persistent config** — settings are stored in SQLite and restored on reload
 - **Shareable read-only links** — generate a unique `/s/<token>` URL; friends cannot edit any parameters, and the page content follows the main page config in real time
 - **Deployable** — pure Python backend, runs on any VPS
@@ -17,7 +20,7 @@ Inspired by the classic heart parametric equation `x = 16 sin³(t), y = 13 cos(t
 ## Tech Stack
 
 - Backend: Flask + SQLModel + SQLite
-- Frontend: HTML5 Canvas + vanilla JavaScript
+- Frontend: Three.js 0.160 (WebGL) + vanilla JavaScript (ES modules via import map)
 - Python 3.12, managed by `uv`
 
 ## Quick Start
@@ -61,7 +64,7 @@ All visual parameters can be tuned live in the web UI (top-right panel) and are 
 | `spread_ratio` | Overall heart scale |
 | `heart_color` | Heart particle color (HEX) |
 | `background_color` | Background color (HEX) |
-| `show_text` | Whether to display text below the heart |
+| `show_text` | Whether to display 3D art text in the center of the heart |
 | `text_content` | The text to display |
 | `text_color` | Text color (HEX) |
 | `depth_3d` | Enable 3D rotating heart |

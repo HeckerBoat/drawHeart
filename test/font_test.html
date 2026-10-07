@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><title>font test</title></head>
+<body style="background:#222;color:#fff">
+<canvas id="c" width="1200" height="600" style="background:#333"></canvas>
+<script>
+const c = document.getElementById("c");
+const ctx = c.getContext("2d");
+const fonts = [
+  // 当前 heart.js 使用的字体串
+  'italic 900 60px Georgia, "Times New Roman", "STXingkai", "华文行楷", "KaiTi", "STKaiti", "Microsoft YaHei", sans-serif',
+  // 不带 italic
+  '900 60px Georgia, "Times New Roman", "STXingkai", "华文行楷", "KaiTi", "STKaiti", "Microsoft YaHei", sans-serif',
+  // 中文优先
+  '900 60px "STXingkai", "华文行楷", "KaiTi", "STKaiti", "Microsoft YaHei", Georgia, sans-serif',
+  // 普通系统栈（对照组）
+  '600 60px "Microsoft YaHei", "PingFang SC", sans-serif',
+];
+const text = "我爱你 Love 2026";
+fonts.forEach((f, i) => {
+  ctx.font = f;
+  ctx.fillStyle = "#fff";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "top";
+  ctx.fillText(`[${i}] ` + text, 20, 20 + i * 90);
+  ctx.font = "14px monospace";
+  ctx.fillStyle = "#888";
+  ctx.fillText(f, 20, 20 + i * 90 + 62);
+});
+</script>
+</body>
+</html>

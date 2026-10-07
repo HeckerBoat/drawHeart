@@ -94,6 +94,16 @@
     <!-- 鼠标提示 -->
     <div class="tip">移动鼠标洒落星光 · 点击绽放爱心</div>
 
+    <!-- Three.js 及插件（import map 方式） -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
     <script>
         // 页面模式：edit（可编辑主页）/ share（只读分享页）
         window.PAGE_MODE = "{{ 'share' if readonly else 'edit' }}";
@@ -102,6 +112,6 @@
         window.SHARE_TOKEN = location.pathname.split("/s/")[1] || "";
         {% endif %}
     </script>
-    <script src="{{ url_for('static', filename='js/heart.js') }}"></script>
+    <script type="module" src="{{ url_for('static', filename='js/heart.js') }}"></script>
 </body>
 </html>

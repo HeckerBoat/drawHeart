@@ -19,7 +19,7 @@ drawHeart/
 │       ├── css/
 │       │   └── style.css        # 全局样式、控制面板样式、分享按钮与只读标识样式
 │       └── js/
-│           └── heart.js        # 动态心形动画核心逻辑（粒子系统、心跳、交互、配置同步、生成分享链接）
+│           └── heart.js        # 3D 心形粒子动画核心逻辑（Three.js + ExtrudeGeometry + MeshSurfaceSampler，含心跳、旋转、噪声蠕动、鼠标飞散粒子、居中立体艺术字、配置同步）
 ├── db/                           # SQLite 数据库目录（运行时生成 config.db）
 ├── weights/                      # 权重模型目录（本项目暂未使用，预留）
 ├── .venv/                        # Python 虚拟环境（git 忽略）
@@ -39,9 +39,9 @@ drawHeart/
 | `backend/database.py` | 创建 sqlite 引擎与表，提供 `load_config` / `save_config` / `create_share` / `load_share_config`（实时配置） |
 | `backend/models.py` | 定义 `HeartConfig` 表（粒子数、颜色、跳动速度、文字、3D 开关、旋转速度等）和 `ShareLink` 表（分享 token、创建时间） |
 | `backend/routes.py` | 提供 `/` 主页、`GET/POST /api/config` 接口、`POST /api/share` 生成分享链接、`GET /s/<token>` 只读分享页、`GET /api/share/<token>/config` 读取实时配置 |
-| `frontend/templates/index.html` | 页面结构：全屏 Canvas + 浮动控制面板；`readonly=True` 时不渲染控制面板，显示只读分享标识 |
+| `frontend/templates/index.html` | 页面结构：全屏 WebGL Canvas + 浮动控制面板；通过 import map 引入 Three.js 0.160.0；`readonly=True` 时不渲染控制面板 |
 | `frontend/static/css/style.css` | 页面与控制面板样式、分享按钮样式、只读分享标识样式 |
-| `frontend/static/js/heart.js` | 3D 心形动画核心逻辑（3D 心形曲面、自动旋转、透视投影、深度排序、粒子系统、心跳、交互、配置同步、生成分享链接） |
+| `frontend/static/js/heart.js` | **Three.js 3D 心脏粒子系统**：`THREE.Shape`+`ExtrudeGeometry` 生成 3D 心形几何体，`MeshSurfaceSampler` 从表面采样粒子，Simplex 噪声驱动蠕动，心跳缩放，OrbitControls 自动旋转，鼠标飞散粒子（2D 叠加层），居中立体艺术字（Canvas 多层挤出纹理，作为 heartGroup 子节点随心脏一起旋转），配置同步 |
 | `db/config.db` | sqlite 数据库文件（运行时生成，保存前端参数和分享链接 token） |
 
 ## 数据流
