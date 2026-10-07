@@ -6,10 +6,10 @@ Inspired by the classic heart parametric equation `x = 16 sin³(t), y = 13 cos(t
 
 ## Features
 
-- **Particle-based heart** — hundreds of glowing particles form the heart curve
+- **3D particle heart** — hundreds of glowing particles form a rotating 3D heart surface
 - **Heartbeat rhythm** — double-bump heartbeat curve makes the heart pulse naturally
 - **Mouse interaction** — move the mouse to scatter small hearts; click for a burst
-- **Customizable** — color, particle count, beat speed, text and more, all saved to SQLite
+- **Customizable** — color, particle count, beat speed, 3D rotation speed, text and more, all saved to SQLite
 - **Persistent config** — settings are stored in SQLite and restored on reload
 - **Shareable read-only links** — generate a unique `/s/<token>` URL; friends cannot edit any parameters, and the page content follows the main page config in real time
 - **Deployable** — pure Python backend, runs on any VPS
@@ -64,6 +64,8 @@ All visual parameters can be tuned live in the web UI (top-right panel) and are 
 | `show_text` | Whether to display text below the heart |
 | `text_content` | The text to display |
 | `text_color` | Text color (HEX) |
+| `depth_3d` | Enable 3D rotating heart |
+| `rotation_speed` | 3D rotation speed (rad/s) |
 
 ## Share a Read-Only Link
 

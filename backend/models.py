@@ -35,6 +35,10 @@ class HeartConfig(SQLModel, table=True):
     text_content: str = Field(default="I Love You", max_length=64)
     # 文字颜色
     text_color: str = Field(default="#ffffff", max_length=9)
+    # 是否启用 3D 心形
+    depth_3d: bool = Field(default=False)
+    # 3D 旋转速度（弧度/秒）
+    rotation_speed: float = Field(default=0.4, ge=0.0, le=3.0)
 
     @staticmethod
     def default() -> "HeartConfig":
@@ -53,6 +57,8 @@ class HeartConfig(SQLModel, table=True):
             "show_text": self.show_text,
             "text_content": self.text_content,
             "text_color": self.text_color,
+            "depth_3d": self.depth_3d,
+            "rotation_speed": self.rotation_speed,
         }
 
 

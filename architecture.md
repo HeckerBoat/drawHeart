@@ -37,11 +37,11 @@ drawHeart/
 |------|------|
 | `app.py` | Flask 应用入口，启动后端服务、注册路由、初始化数据库 |
 | `backend/database.py` | 创建 sqlite 引擎与表，提供 `load_config` / `save_config` / `create_share` / `load_share_config`（实时配置） |
-| `backend/models.py` | 定义 `HeartConfig` 表（粒子数、颜色、跳动速度、文字等）和 `ShareLink` 表（分享 token、创建时间） |
+| `backend/models.py` | 定义 `HeartConfig` 表（粒子数、颜色、跳动速度、文字、3D 开关、旋转速度等）和 `ShareLink` 表（分享 token、创建时间） |
 | `backend/routes.py` | 提供 `/` 主页、`GET/POST /api/config` 接口、`POST /api/share` 生成分享链接、`GET /s/<token>` 只读分享页、`GET /api/share/<token>/config` 读取实时配置 |
 | `frontend/templates/index.html` | 页面结构：全屏 Canvas + 浮动控制面板；`readonly=True` 时不渲染控制面板，显示只读分享标识 |
 | `frontend/static/css/style.css` | 页面与控制面板样式、分享按钮样式、只读分享标识样式 |
-| `frontend/static/js/heart.js` | 心形参数方程、粒子系统、心跳动画、鼠标交互、配置同步；`PAGE_MODE=share` 时禁止保存参数并轮询读取实时配置（3 秒） |
+| `frontend/static/js/heart.js` | 3D 心形动画核心逻辑（3D 心形曲面、自动旋转、透视投影、深度排序、粒子系统、心跳、交互、配置同步、生成分享链接） |
 | `db/config.db` | sqlite 数据库文件（运行时生成，保存前端参数和分享链接 token） |
 
 ## 数据流

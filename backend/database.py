@@ -35,10 +35,28 @@ def _migrate_legacy_sharelink() -> None:
             print("[INFO] 已迁移 sharelink 表：移除废弃的 config_json 快照列")
 
 
+def _migrate_heartconfig_3d() -> None:
+    """兼容旧库：为 HeartConfig 表新增 3D 相关列（不存在时）。"""
+    with Session(engine) as session:
+        conn = session.connection()
+        cols = {row[1] for row in conn.execute(text("PRAGMA table_info(heartconfig)")).fetchall()}
+        changed = False
+        if "depth_3d" not in cols:
+            conn.execute(text("ALTER TABLE heartconfig ADD COLUMN depth_3d BOOLEAN DEFAULT 0"))
+            changed = True
+        if "rotation_speed" not in cols:
+            conn.execute(text("ALTER TABLE heartconfig ADD COLUMN rotation_speed FLOAT DEFAULT 0.4"))
+            changed = True
+        if changed:
+            session.commit()
+            print("[INFO] 已迁移 heartconfig 表：新增 depth_3d / rotation_speed 列")
+
+
 def init_db() -> None:
     """初始化数据库：创建所有表、迁移旧表结构并写入默认配置。"""
     SQLModel.metadata.create_all(engine)
     _migrate_legacy_sharelink()
+    _migrate_heartconfig_3d()
 
     # 写入默认配置（如果不存在）
     with Session(engine) as session:
@@ -76,7 +94,7 @@ def save_config(data: dict) -> dict:
         allowed = {
             "particle_count", "heart_color", "background_color",
             "beat_speed", "text_content", "show_text", "text_color",
-            "particle_size", "spread_ratio",
+            "particle_size", "spread_ratio", "depth_3d", "rotation_speed",
         }
         for key, value in data.items():
             if key in allowed:

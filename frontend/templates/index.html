@@ -66,6 +66,15 @@
                 <label for="show_text">显示文字</label>
                 <input type="checkbox" id="show_text" />
             </div>
+            <div class="form-row switch-row">
+                <label for="depth_3d">3D 心形</label>
+                <input type="checkbox" id="depth_3d" />
+            </div>
+            <div class="form-row">
+                <label for="rotation_speed">旋转速度</label>
+                <input type="range" id="rotation_speed" min="0" max="3" step="0.05" />
+                <span class="val" id="rotation_speed_val"></span>
+            </div>
             <div class="form-actions">
                 <button id="save-btn" class="btn primary">保存配置</button>
                 <button id="reset-btn" class="btn">重置</button>
@@ -83,7 +92,7 @@
     {% endif %}
 
     <!-- 鼠标提示 -->
-    <div class="tip">移动鼠标试试，会撒出小心形</div>
+    <div class="tip">移动鼠标洒落星光 · 点击绽放爱心</div>
 
     <script>
         // 页面模式：edit（可编辑主页）/ share（只读分享页）

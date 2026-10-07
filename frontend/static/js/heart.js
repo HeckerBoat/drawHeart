@@ -1,12 +1,13 @@
 /**
- * 动态心形图案 - 核心动画逻辑
+ * 动态心形图案 - 核心动画逻辑（3D 心形版）
  *
- * 实现要点：
- * 1. 经典心形参数方程：x = 16 sin³(t), y = 13 cos(t) - 5 cos(2t) - 2 cos(3t) - cos(4t)
- * 2. 粒子系统：心形上分布大量粒子，每个粒子有微扰 + 拖尾
- * 3. 心跳节奏：使用周期函数让心形整体放大/收缩，模拟心跳
- * 4. 鼠标交互：移动时撒出小心形粒子
- * 5. 与后端配置同步：从 /api/config 读取参数，修改后保存
+ * 视觉构成：
+ * 1. 3D 心形参数方程（沿 Y 轴旋转的心形曲面）
+ * 2. 透视投影：近大远小，带深度雾化
+ * 3. 自动旋转：绕 Y 轴持续旋转，速度可调
+ * 4. 鼠标交互：移动洒落星光小爱心，点击绽放
+ * 5. 柔光精灵预渲染：发光点与爱心烘焙到离屏画布，运行时仅 drawImage
+ * 6. 与后端配置同步：从 /api/config 读取参数，修改后保存
  */
 (function () {
     "use strict";
@@ -19,15 +20,17 @@
 
     // ============== 全局配置（与后端字段同名） ==============
     const cfg = {
-        particle_count: 800,
-        heart_color: "#ff2d55",
-        background_color: "#0a0a1a",
+        particle_count: 1200,
+        heart_color: "#ff6f9c",
+        background_color: "#140b24",
         beat_speed: 1.0,
         particle_size: 2.0,
         spread_ratio: 1.0,
         show_text: true,
         text_content: "I Love You",
-        text_color: "#ffffff",
+        text_color: "#ffeef4",
+        depth_3d: true,
+        rotation_speed: 0.4,
     };
 
     // ============== 画布尺寸 ==============
@@ -41,166 +44,474 @@
         canvas.style.width = W + "px";
         canvas.style.height = H + "px";
         ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+        rebuildStars();
     }
     window.addEventListener("resize", resize);
-    resize();
 
     // ============== 颜色工具 ==============
     function hexToRgb(hex) {
         const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
-        if (!m) return { r: 255, g: 45, b: 85 };
+        if (!m) return { r: 255, g: 111, b: 156 };
         return { r: parseInt(m[1], 16), g: parseInt(m[2], 16), b: parseInt(m[3], 16) };
     }
     function rgbaStr(rgb, a) { return `rgba(${rgb.r},${rgb.g},${rgb.b},${a})`; }
+    function mixRgb(a, b, t) {
+        return {
+            r: Math.round(a.r + (b.r - a.r) * t),
+            g: Math.round(a.g + (b.g - a.g) * t),
+            b: Math.round(a.b + (b.b - a.b) * t),
+        };
+    }
 
-    // ============== 心形参数方程 ==============
-    // t ∈ [0, 2π]
-    function heartPoint(t) {
+    // ============== 3D 心形参数方程 ==============
+    /**
+     * 3D 心形曲面参数方程
+     * x = 16 sin³(t)
+     * y = 13 cos(t) - 5 cos(2t) - 2 cos(3t) - cos(4t)
+     * z = z 方向厚度（用 u 参数控制，让心形沿 z 轴有体积）
+     */
+    function heart3D(t, u) {
         const x = 16 * Math.pow(Math.sin(t), 3);
         const y = 13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t);
-        return { x, y };
+        // z 方向厚度：越靠近边缘越薄，中心最厚
+        const thickness = Math.sin(t) * 0.6 + 0.4;
+        const z = u * 10 * thickness;
+        return { x, y, z };
+    }
+
+    // 旋转矩阵（绕 Y 轴）
+    function rotateY(x, z, angle) {
+        const cos = Math.cos(angle);
+        const sin = Math.sin(angle);
+        return {
+            x: x * cos - z * sin,
+            z: x * sin + z * cos,
+        };
+    }
+
+    // 透视投影
+    function project(x, y, z, fov, scale) {
+        const depth = z + 35; // 把心形推到相机前方
+        const s = fov / Math.max(depth, 1);
+        return {
+            x: x * s * scale,
+            y: y * s * scale,
+            scale: s,
+            depth: depth,
+        };
+    }
+
+    // ============== 柔光精灵（离屏预烘焙） ==============
+    let sprites = null;
+    let spriteColor = "";
+
+    function makeGlowSprite(rgb) {
+        const S = 128;
+        const c = document.createElement("canvas");
+        c.width = c.height = S;
+        const g = c.getContext("2d");
+        const grd = g.createRadialGradient(S / 2, S / 2, 0, S / 2, S / 2, S / 2);
+        grd.addColorStop(0, rgbaStr(rgb, 0.95));
+        grd.addColorStop(0.22, rgbaStr(rgb, 0.42));
+        grd.addColorStop(0.55, rgbaStr(rgb, 0.12));
+        grd.addColorStop(1, rgbaStr(rgb, 0));
+        g.fillStyle = grd;
+        g.fillRect(0, 0, S, S);
+        return c;
+    }
+
+    function traceHeartPath(g, s) {
+        g.beginPath();
+        const step = 0.08;
+        for (let tt = 0; tt <= Math.PI * 2 + 0.001; tt += step) {
+            const pt = heart3D(tt, 0);
+            const x = pt.x * s;
+            const y = -pt.y * s;
+            if (tt === 0) g.moveTo(x, y);
+            else g.lineTo(x, y);
+        }
+        g.closePath();
+    }
+
+    function makeHeartSprite(rgb) {
+        const S = 160;
+        const c = document.createElement("canvas");
+        c.width = c.height = S;
+        const g = c.getContext("2d");
+        g.translate(S / 2, S / 2 + 4);
+        const s = 2.7;
+
+        traceHeartPath(g, s);
+        g.shadowColor = rgbaStr(rgb, 0.95);
+        g.shadowBlur = 26;
+        g.fillStyle = rgbaStr(rgb, 0.95);
+        g.fill();
+
+        g.shadowBlur = 0;
+        g.fill();
+
+        g.save();
+        traceHeartPath(g, s);
+        g.clip();
+        const hl = g.createRadialGradient(0, -s * 3, 0, 0, -s * 3, s * 13);
+        hl.addColorStop(0, "rgba(255,255,255,0.5)");
+        hl.addColorStop(0.5, "rgba(255,255,255,0.12)");
+        hl.addColorStop(1, "rgba(255,255,255,0)");
+        g.fillStyle = hl;
+        g.fillRect(-70, -70, 140, 140);
+        g.restore();
+        return c;
+    }
+
+    function ensureSprites() {
+        if (spriteColor === cfg.heart_color && sprites) return;
+        const main = hexToRgb(cfg.heart_color);
+        const light = mixRgb(main, { r: 255, g: 240, b: 246 }, 0.55);
+        sprites = {
+            glowMain: makeGlowSprite(main),
+            glowLight: makeGlowSprite(light),
+            glowWhite: makeGlowSprite({ r: 255, g: 255, b: 255 }),
+            heartMain: makeHeartSprite(main),
+            heartLight: makeHeartSprite(light),
+            heartWhite: makeHeartSprite(mixRgb(main, { r: 255, g: 255, b: 255 }, 0.75)),
+        };
+        spriteColor = cfg.heart_color;
+    }
+
+    // ============== 背景渐变层缓存 ==============
+    let bgLayer = { key: "", canvas: null };
+    function ensureBackground() {
+        const key = W + "_" + H + "_" + cfg.background_color + "_" + cfg.heart_color;
+        if (bgLayer.key === key && bgLayer.canvas) return bgLayer.canvas;
+
+        const c = document.createElement("canvas");
+        c.width = W * DPR;
+        c.height = H * DPR;
+        const g = c.getContext("2d");
+        g.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+        const bg = hexToRgb(cfg.background_color);
+        const center = mixRgb(bg, { r: 255, g: 255, b: 255 }, 0.07);
+        const warm = mixRgb(bg, hexToRgb(cfg.heart_color), 0.22);
+        const grd = g.createRadialGradient(
+            W / 2, H * 0.44, 0,
+            W / 2, H * 0.5, Math.max(W, H) * 0.78
+        );
+        grd.addColorStop(0, rgbaStr(center, 1));
+        grd.addColorStop(0.5, rgbaStr(warm, 1));
+        grd.addColorStop(1, rgbaStr(bg, 1));
+        g.fillStyle = grd;
+        g.fillRect(0, 0, W, H);
+
+        bgLayer = { key, canvas: c };
+        return c;
     }
 
     // ============== 粒子系统 ==============
-    // 主心形上的粒子
-    let mainParticles = [];
-    // 飞散的小心形粒子（鼠标交互产生）
+    let particles3d = [];
+    let stars = [];
+    let embers = [];
     let flyParticles = [];
 
-    function rebuildMainParticles() {
-        mainParticles = [];
+    function rebuildStars() {
+        stars = [];
+        const count = Math.min(190, Math.floor((W * H) / 8500));
+        for (let i = 0; i < count; i++) {
+            stars.push({
+                x: Math.random() * W,
+                y: Math.random() * H,
+                r: 0.4 + Math.random() * 1.2,
+                phase: Math.random() * Math.PI * 2,
+                tw: 0.4 + Math.random() * 1.4,
+                tint: Math.random() < 0.72 ? 2 : 1,
+            });
+        }
+    }
+
+    function rebuildEmbers() {
+        embers = [];
+        for (let i = 0; i < 38; i++) {
+            embers.push({
+                ph: Math.random(),
+                rise: 0.018 + Math.random() * 0.03,
+                ox: Math.random() * W,
+                sway: Math.random() * Math.PI * 2,
+                amp: 12 + Math.random() * 26,
+                size: 0.9 + Math.random() * 1.8,
+                tint: Math.random() < 0.55 ? 1 : (Math.random() < 0.7 ? 2 : 0),
+            });
+        }
+    }
+
+    function rebuildParticles() {
+        particles3d = [];
         const N = cfg.particle_count;
+        const glowTints = [0, 1, 2]; // 主色 / 柔粉 / 白
+
         for (let i = 0; i < N; i++) {
-            const t = (i / N) * Math.PI * 2;
-            mainParticles.push({
-                t,                         // 心形参数
-                offset: Math.random() * Math.PI * 2, // 相位扰动
-                radius: 0.6 + Math.random() * 0.8,   // 距离心形边的偏移
-                jitter: (Math.random() - 0.5) * 0.4, // 随机抖动
-                size: 0.6 + Math.random() * 0.8,      // 粒子大小系数
-                alpha: 0.4 + Math.random() * 0.6,
+            const t = Math.random() * Math.PI * 2;
+            // u 控制 z 方向厚度：-1 到 1
+            const u = (Math.random() * 2 - 1) * (0.3 + Math.random() * 0.7);
+            const pos = heart3D(t, u);
+
+            const roll = Math.random();
+            particles3d.push({
+                t: t,
+                u: u,
+                x: pos.x,
+                y: pos.y,
+                z: pos.z,
+                // 沿曲面缓慢流动
+                flowSpeed: 0.05 + Math.random() * 0.15,
+                // 闪烁
+                phase: Math.random() * Math.PI * 2,
+                tw: 1.2 + Math.random() * 2.8,
+                sizeMul: 0.6 + Math.random() * 0.9,
+                base: 0.55 + Math.random() * 0.45,
+                tint: roll < 0.54 ? 0 : (roll < 0.91 ? 1 : 2),
+                // 随机偏移让表面更自然
+                offsetX: (Math.random() - 0.5) * 0.4,
+                offsetY: (Math.random() - 0.5) * 0.4,
             });
         }
     }
 
     function spawnFlyParticle(x, y) {
-        // 在鼠标位置产生一个小的心形粒子，向外飞
         const angle = Math.random() * Math.PI * 2;
-        const speed = 1 + Math.random() * 2;
+        const speed = 0.6 + Math.random() * 1.8;
         flyParticles.push({
             x, y,
             vx: Math.cos(angle) * speed,
-            vy: Math.sin(angle) * speed - 0.5, // 略向上
+            vy: Math.sin(angle) * speed - 0.9,
+            rot: Math.random() * Math.PI * 2,
+            vr: (Math.random() - 0.5) * 2.4,
             life: 1.0,
-            size: 1.5 + Math.random() * 2.5,
-            t: Math.random() * Math.PI * 2,
+            decay: 0.009 + Math.random() * 0.008,
+            size: 11 + Math.random() * 12,
+            phase: Math.random() * Math.PI * 2,
+            kind: Math.random() < 0.72 ? 0 : 1,
+            tint: Math.random() < 0.5 ? 0 : (Math.random() < 0.7 ? 1 : 2),
         });
-        if (flyParticles.length > 200) flyParticles.shift();
+        if (flyParticles.length > 260) flyParticles.shift();
     }
 
     // ============== 心跳函数 ==============
-    // 模拟心跳节奏：双跳
-    function beatScale(timeSec) {
-        const T = 1.0; // 1 秒一个周期
-        const phase = (timeSec * cfg.beat_speed) % T / T; // [0, 1]
-        // 心跳曲线：两个 bump
+    function beatState(timeSec) {
+        const T = 1.15;
+        const phase = ((timeSec * cfg.beat_speed) % T) / T;
         const bump = (p, c, w) => Math.exp(-Math.pow((p - c) / w, 2));
-        const b1 = bump(phase, 0.12, 0.05);
-        const b2 = bump(phase, 0.32, 0.06);
-        return 1.0 + (b1 * 0.18 + b2 * 0.10);
+        const pulse = bump(phase, 0.09, 0.075) * 0.085 + bump(phase, 0.30, 0.095) * 0.05;
+        const breathe = Math.sin(timeSec * 0.8) * 0.015;
+        return { scale: 1 + pulse + breathe, pulse };
     }
 
-    // ============== 绘制主心形 ==============
-    function drawHeart(timeSec) {
+    // ============== 绘制背景 ==============
+    function drawBackground() {
+        ctx.globalCompositeOperation = "source-over";
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = cfg.background_color;
+        ctx.fillRect(0, 0, W, H);
+        ctx.drawImage(ensureBackground(), 0, 0, W, H);
+    }
+
+    // ============== 绘制闪烁星空 ==============
+    function drawStars(timeSec) {
+        ctx.globalCompositeOperation = "source-over";
+        const list = [sprites.glowMain, sprites.glowLight, sprites.glowWhite];
+        for (let i = 0; i < stars.length; i++) {
+            const s = stars[i];
+            const tw = Math.pow(0.5 + 0.5 * Math.sin(timeSec * s.tw + s.phase), 2);
+            const alpha = 0.12 + 0.6 * tw;
+            const d = s.r * (5 + tw * 3.5);
+            ctx.globalAlpha = alpha;
+            ctx.drawImage(list[s.tint], s.x - d / 2, s.y - d / 2, d, d);
+        }
+        ctx.globalAlpha = 1;
+    }
+
+    // ============== 绘制上升的许愿光点 ==============
+    function drawEmbers(timeSec, dt) {
+        ctx.globalCompositeOperation = "lighter";
+        const list = [sprites.glowMain, sprites.glowLight, sprites.glowWhite];
+        for (let i = 0; i < embers.length; i++) {
+            const e = embers[i];
+            e.ph -= dt * e.rise;
+            if (e.ph <= 0) {
+                e.ph = 1;
+                e.ox = Math.random() * W;
+                e.sway = Math.random() * Math.PI * 2;
+            }
+            const y = H * (1 - e.ph) + 12;
+            const x = e.ox + Math.sin(timeSec * 0.9 + e.sway) * e.amp;
+            const alpha = Math.sin(e.ph * Math.PI) * 0.7;
+            const d = e.size * 7.5;
+            ctx.globalAlpha = alpha;
+            ctx.drawImage(list[e.tint], x - d / 2, y - d / 2, d, d);
+        }
+        ctx.globalAlpha = 1;
+    }
+
+    // ============== 绘制 3D 心形 ==============
+    let rotAngle = 0;
+
+    function drawHeart3D(timeSec, dt) {
         const cx = W / 2;
         const cy = H / 2;
-        const scale = Math.min(W, H) / 40 * cfg.spread_ratio;
-        const beat = beatScale(timeSec);
-        const rgb = hexToRgb(cfg.heart_color);
+        const baseScale = Math.min(W, H) / 45 * cfg.spread_ratio;
+        const beat = beatState(timeSec);
+        const fov = 60;
 
-        // 心形整体使用 lighter 合成模式让粒子叠加发光
+        // 更新旋转角度
+        rotAngle += cfg.rotation_speed * dt;
+
         ctx.globalCompositeOperation = "lighter";
 
-        for (let i = 0; i < mainParticles.length; i++) {
-            const p = mainParticles[i];
-            // 心形上的点（带轻微扰动）
-            const tt = p.t + Math.sin(timeSec * 0.6 + p.offset) * 0.005;
-            const pt = heartPoint(tt);
-            // 加上粒子半径方向偏移（看起来有厚度）
-            const r = p.radius * 0.4;
-            const px = (pt.x + Math.cos(p.offset) * r) * scale * beat;
-            const py = (-pt.y + Math.sin(p.offset) * r) * scale * beat; // y 翻转
+        // 心形整体光晕（2D 层，不旋转）
+        const haloD = baseScale * 30 * beat.scale;
+        ctx.globalAlpha = 0.10 + beat.pulse * 0.5;
+        ctx.drawImage(sprites.glowMain, cx - haloD / 2, cy - haloD / 2, haloD, haloD);
+        const haloD2 = baseScale * 15 * beat.scale;
+        ctx.globalAlpha = 0.06 + beat.pulse * 0.35;
+        ctx.drawImage(sprites.glowWhite, cx - haloD2 / 2, cy - haloD2 / 2, haloD2, haloD2);
 
-            const x = cx + px + p.jitter * scale * 0.05;
-            const y = cy + py + p.jitter * scale * 0.05;
+        // 预计算所有粒子的投影位置并排序
+        const projected = [];
+        const glowList = [sprites.glowMain, sprites.glowLight, sprites.glowWhite];
 
-            // 粒子绘制：径向渐变发光
-            const size = p.size * cfg.particle_size;
-            const alpha = p.alpha;
-            const grd = ctx.createRadialGradient(x, y, 0, x, y, size * 4);
-            grd.addColorStop(0, rgbaStr(rgb, alpha));
-            grd.addColorStop(0.4, rgbaStr(rgb, alpha * 0.4));
-            grd.addColorStop(1, rgbaStr(rgb, 0));
-            ctx.fillStyle = grd;
-            ctx.beginPath();
-            ctx.arc(x, y, size * 4, 0, Math.PI * 2);
-            ctx.fill();
+        for (let i = 0; i < particles3d.length; i++) {
+            const p = particles3d[i];
 
-            // 中心亮点
-            ctx.fillStyle = rgbaStr({ r: 255, g: 255, b: 255 }, alpha * 0.8);
-            ctx.beginPath();
-            ctx.arc(x, y, size * 0.6, 0, Math.PI * 2);
-            ctx.fill();
+            // 沿曲面缓慢流动
+            p.t += p.flowSpeed * dt;
+            if (p.t > Math.PI * 2) p.t -= Math.PI * 2;
+
+            // 重新计算 3D 位置（带流动和心跳）
+            const pos = heart3D(p.t, p.u);
+            const x3 = (pos.x + p.offsetX) * beat.scale;
+            const y3 = (pos.y + p.offsetY) * beat.scale;
+            const z3 = pos.z * beat.scale;
+
+            // 绕 Y 轴旋转
+            const rot = rotateY(x3, z3, rotAngle);
+
+            // 透视投影
+            const proj = project(rot.x, y3, rot.z, fov, baseScale);
+
+            projected.push({
+                screenX: cx + proj.x,
+                screenY: cy - proj.y,
+                scale: proj.scale,
+                depth: proj.depth,
+                particle: p,
+            });
         }
 
-        // 心形外圈光晕
-        ctx.globalCompositeOperation = "lighter";
-        const haloR = scale * 14 * beat;
-        const halo = ctx.createRadialGradient(cx, cy + scale * 2, 0, cx, cy + scale * 2, haloR);
-        halo.addColorStop(0, rgbaStr(rgb, 0.18));
-        halo.addColorStop(0.5, rgbaStr(rgb, 0.06));
-        halo.addColorStop(1, rgbaStr(rgb, 0));
-        ctx.fillStyle = halo;
-        ctx.beginPath();
-        ctx.arc(cx, cy + scale * 2, haloR, 0, Math.PI * 2);
-        ctx.fill();
+        // 按深度排序：远的先画，近的后画（ painter's algorithm ）
+        projected.sort((a, b) => b.depth - a.depth);
 
+        // 绘制排序后的粒子
+        for (let i = 0; i < projected.length; i++) {
+            const item = projected[i];
+            const p = item.particle;
+
+            // 闪烁
+            const tw = Math.pow(0.5 + 0.5 * Math.sin(timeSec * p.tw + p.phase), 2.2);
+            const depthFade = Math.max(0.15, Math.min(1, 1.4 - item.depth / 60));
+            const alpha = p.base * (0.2 + 0.5 * tw) * depthFade;
+
+            // 大小随透视缩放
+            const d = cfg.particle_size * p.sizeMul * 6.5 * item.scale * beat.scale;
+
+            ctx.globalAlpha = alpha;
+            ctx.drawImage(
+                glowList[p.tint],
+                item.screenX - d / 2,
+                item.screenY - d / 2,
+                d,
+                d
+            );
+        }
+
+        ctx.globalAlpha = 1;
         ctx.globalCompositeOperation = "source-over";
     }
 
-    // ============== 绘制飞散的小心形 ==============
-    function drawFlyParticles() {
+    // ============== 绘制 2D 心形（兼容模式） ==============
+    function drawHeart2D(timeSec, dt) {
+        const cx = W / 2;
+        const cy = H / 2;
+        const scale = Math.min(W, H) / 40 * cfg.spread_ratio;
+        const beat = beatState(timeSec);
+
         ctx.globalCompositeOperation = "lighter";
-        const rgb = hexToRgb(cfg.heart_color);
+
+        const haloD = scale * 34 * beat.scale;
+        ctx.globalAlpha = 0.12 + beat.pulse * 0.55;
+        ctx.drawImage(sprites.glowMain, cx - haloD / 2, cy - haloD / 2 + scale * 1.5, haloD, haloD);
+        const haloD2 = scale * 17 * beat.scale;
+        ctx.globalAlpha = 0.07 + beat.pulse * 0.4;
+        ctx.drawImage(sprites.glowWhite, cx - haloD2 / 2, cy - haloD2 / 2 + scale * 1.5, haloD2, haloD2);
+
+        const glowList = [sprites.glowMain, sprites.glowLight, sprites.glowWhite];
+
+        for (let i = 0; i < particles3d.length; i++) {
+            const p = particles3d[i];
+            p.t += p.flowSpeed * dt;
+            if (p.t > Math.PI * 2) p.t -= Math.PI * 2;
+
+            const pos = heart3D(p.t, 0);
+            const X = (pos.x + p.offsetX) * beat.scale;
+            const Y = (-pos.y + p.offsetY) * beat.scale;
+
+            const tw = Math.pow(0.5 + 0.5 * Math.sin(timeSec * p.tw + p.phase), 2.2);
+            const alpha = p.base * (0.2 + 0.5 * tw);
+            const d = cfg.particle_size * p.sizeMul * 7 * beat.scale;
+
+            ctx.globalAlpha = alpha;
+            ctx.drawImage(glowList[p.tint], cx + X * scale - d / 2, cy + Y * scale - d / 2, d, d);
+        }
+
+        ctx.globalAlpha = 1;
+        ctx.globalCompositeOperation = "source-over";
+    }
+
+    // ============== 绘制飞散的星光小爱心 ==============
+    function drawFlyParticles(timeSec, dt) {
+        ctx.globalCompositeOperation = "lighter";
+        const step = dt * 60;
+        const heartImgs = [sprites.heartMain, sprites.heartLight, sprites.heartWhite];
+        const glowImgs = [sprites.glowMain, sprites.glowLight, sprites.glowWhite];
+
         for (let i = flyParticles.length - 1; i >= 0; i--) {
             const f = flyParticles[i];
-            // 物理：重力 + 速度衰减
-            f.vy += 0.04;
-            f.vx *= 0.99;
-            f.x += f.vx;
-            f.y += f.vy;
-            f.life -= 0.012;
+            f.vy += 0.012 * step;
+            f.vx *= Math.pow(0.985, step);
+            f.vy *= Math.pow(0.992, step);
+            f.x += f.vx * step;
+            f.y += f.vy * step;
+            f.rot += f.vr * dt;
+            f.life -= f.decay * step;
             if (f.life <= 0) {
                 flyParticles.splice(i, 1);
                 continue;
             }
-            // 画一个小心形
-            const s = f.size * f.life;
-            ctx.save();
-            ctx.translate(f.x, f.y);
-            ctx.fillStyle = rgbaStr(rgb, f.life * 0.9);
-            ctx.beginPath();
-            for (let t = 0; t < Math.PI * 2; t += 0.2) {
-                const pt = heartPoint(t);
-                const x = pt.x * s * 0.08;
-                const y = -pt.y * s * 0.08;
-                if (t === 0) ctx.moveTo(x, y);
-                else ctx.lineTo(x, y);
+
+            const twinkle = 0.65 + 0.35 * Math.sin(timeSec * 9 + f.phase);
+            ctx.globalAlpha = Math.max(0, f.life) * twinkle;
+
+            if (f.kind === 0) {
+                const d = f.size * (0.55 + 0.45 * f.life);
+                ctx.save();
+                ctx.translate(f.x, f.y);
+                ctx.rotate(f.rot);
+                ctx.drawImage(heartImgs[f.tint], -d / 2, -d / 2, d, d);
+                ctx.restore();
+            } else {
+                const d = f.size * 0.55 * (0.5 + 0.5 * f.life);
+                ctx.drawImage(glowImgs[f.tint], f.x - d / 2, f.y - d / 2, d, d);
             }
-            ctx.closePath();
-            ctx.fill();
-            ctx.restore();
         }
+        ctx.globalAlpha = 1;
         ctx.globalCompositeOperation = "source-over";
     }
 
@@ -208,43 +519,44 @@
     function drawText(timeSec) {
         if (!cfg.show_text || !cfg.text_content) return;
         const cx = W / 2;
-        const cy = H / 2 + Math.min(W, H) * 0.18;
+        const cy = H / 2 + Math.min(W, H) * 0.19;
         const rgb = hexToRgb(cfg.text_color);
 
-        // 文字呼吸渐变
-        const fade = 0.7 + Math.sin(timeSec * 1.4) * 0.3;
+        const fade = 0.72 + Math.sin(timeSec * 1.2) * 0.28;
 
-        const fontSize = Math.max(18, Math.min(W, H) * 0.045);
-        ctx.font = `600 ${fontSize}px -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif`;
+        const fontSize = Math.max(16, Math.min(W, H) * 0.04);
+        ctx.font = `300 ${fontSize}px -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif`;
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
 
-        // 阴影
-        ctx.shadowColor = rgbaStr(hexToRgb(cfg.heart_color), 0.8);
-        ctx.shadowBlur = 24;
+        ctx.shadowColor = rgbaStr(hexToRgb(cfg.heart_color), 0.75);
+        ctx.shadowBlur = 20;
         ctx.fillStyle = rgbaStr(rgb, fade);
         ctx.fillText(cfg.text_content, cx, cy);
         ctx.shadowBlur = 0;
     }
 
-    // ============== 背景拖尾 ==============
-    function drawBackground() {
-        // 半透明背景，制造拖尾效果
-        const rgb = hexToRgb(cfg.background_color);
-        // 拖尾透明度：0.18 让粒子有运动残留
-        ctx.fillStyle = `rgba(${rgb.r},${rgb.g},${rgb.b},0.18)`;
-        ctx.fillRect(0, 0, W, H);
-    }
-
     // ============== 主循环 ==============
     let startTime = performance.now();
+    let lastFrame = startTime;
     function loop() {
         const now = performance.now();
         const t = (now - startTime) / 1000;
+        const dt = Math.min(0.05, (now - lastFrame) / 1000);
+        lastFrame = now;
 
+        ensureSprites();
         drawBackground();
-        drawHeart(t);
-        drawFlyParticles();
+        drawStars(t);
+        drawEmbers(t, dt);
+
+        if (cfg.depth_3d) {
+            drawHeart3D(t, dt);
+        } else {
+            drawHeart2D(t, dt);
+        }
+
+        drawFlyParticles(t, dt);
         drawText(t);
 
         requestAnimationFrame(loop);
@@ -254,28 +566,25 @@
     let lastSpawn = 0;
     window.addEventListener("mousemove", (e) => {
         const now = performance.now();
-        if (now - lastSpawn < 60) return;
+        if (now - lastSpawn < 70) return;
         lastSpawn = now;
-        // 在鼠标附近撒 1~3 个小心形
-        const n = 1 + Math.floor(Math.random() * 3);
+        const n = 1 + Math.floor(Math.random() * 2);
         for (let i = 0; i < n; i++) {
             spawnFlyParticle(e.clientX + (Math.random() - 0.5) * 20, e.clientY + (Math.random() - 0.5) * 20);
         }
     });
-    // 点击爆发
     window.addEventListener("click", (e) => {
-        for (let i = 0; i < 20; i++) {
+        for (let i = 0; i < 24; i++) {
             spawnFlyParticle(e.clientX, e.clientY);
         }
     });
 
     // ============== 控制面板交互 ==============
-    const fields = ["particle_count", "particle_size", "beat_speed", "spread_ratio"];
+    const fields = ["particle_count", "particle_size", "beat_speed", "spread_ratio", "rotation_speed"];
     const colorFields = ["heart_color", "background_color", "text_color"];
     const textFields = ["text_content"];
-    const boolFields = ["show_text"];
+    const boolFields = ["show_text", "depth_3d"];
 
-    // 分享页没有控制面板，所有面板元素绑定前判空
     function bindRangeVal(id) {
         const el = document.getElementById(id);
         const val = document.getElementById(id + "_val");
@@ -285,7 +594,7 @@
         };
         el.addEventListener("input", () => {
             cfg[id] = parseFloat(el.value);
-            if (id === "particle_count") rebuildMainParticles();
+            if (id === "particle_count") rebuildParticles();
             update();
             scheduleSave();
         });
@@ -320,7 +629,6 @@
         });
     });
 
-    // 折叠
     const collapseBtn = document.getElementById("collapse-btn");
     if (collapseBtn) {
         collapseBtn.addEventListener("click", () => {
@@ -331,13 +639,13 @@
     // ============== 与后端同步 ==============
     let saveTimer = null;
     function scheduleSave() {
-        if (IS_SHARE) return; // 只读分享页禁止保存
+        if (IS_SHARE) return;
         if (saveTimer) clearTimeout(saveTimer);
-        saveTimer = setTimeout(saveConfig, 600); // 防抖
+        saveTimer = setTimeout(saveConfig, 600);
     }
 
     async function saveConfig() {
-        if (IS_SHARE) return; // 只读分享页禁止保存
+        if (IS_SHARE) return;
         try {
             const resp = await fetch("/api/config", {
                 method: "POST",
@@ -352,7 +660,6 @@
     }
 
     async function fetchConfig() {
-        // 分享页读取实时配置（随主页变化）；主页读取当前配置
         const url = IS_SHARE
             ? `/api/share/${window.SHARE_TOKEN}/config`
             : "/api/config";
@@ -374,7 +681,6 @@
     }
 
     // ============== 分享页轮询 ==============
-    // 父页面（主页）修改配置后，分享页自动跟随变化；间隔 3 秒轻量轮询
     const SHARE_POLL_INTERVAL = 3000;
     let lastServerCfgJson = "";
 
@@ -382,7 +688,7 @@
         const countChanged = data.particle_count !== cfg.particle_count;
         Object.assign(cfg, data);
         applyCfgToUI();
-        if (countChanged) rebuildMainParticles();
+        if (countChanged) rebuildParticles();
     }
 
     if (IS_SHARE) {
@@ -395,7 +701,7 @@
                 applyServerConfig(data);
                 lastServerCfgJson = json;
             } catch (_) {
-                // 轮询失败静默跳过，等待下一轮
+                // 轮询失败静默跳过
             }
         }, SHARE_POLL_INTERVAL);
     }
@@ -426,19 +732,21 @@
     if (resetBtn) {
         resetBtn.addEventListener("click", () => {
             const defaults = {
-                particle_count: 800,
-                heart_color: "#ff2d55",
-                background_color: "#0a0a1a",
+                particle_count: 1200,
+                heart_color: "#ff6f9c",
+                background_color: "#140b24",
                 beat_speed: 1.0,
                 particle_size: 2.0,
                 spread_ratio: 1.0,
                 show_text: true,
                 text_content: "I Love You",
-                text_color: "#ffffff",
+                text_color: "#ffeef4",
+                depth_3d: true,
+                rotation_speed: 0.4,
             };
             Object.assign(cfg, defaults);
             applyCfgToUI();
-            rebuildMainParticles();
+            rebuildParticles();
             scheduleSave();
         });
     }
@@ -459,7 +767,6 @@
             const row = document.getElementById("share-row");
             const input = document.getElementById("share-url");
             try {
-                // 先保存当前参数，确保分享快照是最新效果
                 await saveConfig();
                 const resp = await fetch("/api/share", { method: "POST" });
                 const data = await resp.json();
@@ -474,7 +781,6 @@
                     input.focus();
                     input.select();
                 }
-                // 尝试复制到剪贴板（失败仅打印控制台，不弹窗）
                 try {
                     await navigator.clipboard.writeText(fullUrl);
                     if (hint) hint.textContent = "链接已生成并复制，发送给朋友即可（对方只能观看，内容随本页设置实时变化）";
@@ -488,8 +794,11 @@
     }
 
     // ============== 启动 ==============
+    resize();
+    rebuildEmbers();
     loadConfigFromServer().finally(() => {
-        rebuildMainParticles();
+        ensureSprites();
+        rebuildParticles();
         loop();
     });
 })();
