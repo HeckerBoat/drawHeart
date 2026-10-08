@@ -32,6 +32,8 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
         text_content: "I Love You",
         text_color: "#ffeef4",
         text_size: 1.0,
+        text_x: 0.0,
+        text_y: 0.4,
         depth_3d: true,
         rotation_speed: 0.4,
         show_fireworks: true,
@@ -51,6 +53,70 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
         const pink = base.clone().lerp(new THREE.Color(0xffb6d5), 0.35);
         const deep = base.clone().multiplyScalar(0.6);
         return [light, pink, base, deep];
+    }
+
+    // ============== 心形 2D 轮廓与边界检测 ==============
+    // 与 createHeartGeometry 使用同一 Shape，经居中处理后得到心形多边形，
+    // 用于判定文字矩形是否落在心脏范围内（不超出心脏）。
+    let heartPolygon = null;      // 原始心形轮廓
+    let heartSafePolygon = null;  // 内缩后的安全区域（给文字留出边距）
+
+    function buildHeartPolygon() {
+        const shape = new THREE.Shape();
+        shape.moveTo(0, 0.5);
+        shape.bezierCurveTo(0, 0.5, -0.3, 1.1, -1.1, 1.1);
+        shape.bezierCurveTo(-2.1, 1.1, -2.1, -0.1, -2.1, -0.1);
+        shape.bezierCurveTo(-2.1, -0.85, -1.4, -1.6, 0, -2.4);
+        shape.bezierCurveTo(1.4, -1.6, 2.1, -0.85, 2.1, -0.1);
+        shape.bezierCurveTo(2.1, -0.1, 2.1, 1.1, 1.1, 1.1);
+        shape.bezierCurveTo(0.4, 1.1, 0, 0.5, 0, 0.5);
+        const pts = shape.getPoints(160);
+        // geom.center() 会将包围盒中心平移到原点；shape 包围盒中心 y = (-2.4 + 1.1) / 2 = -0.65
+        heartPolygon = pts.map(p => ({ x: p.x, y: p.y + 0.65 }));
+        // 安全区域：整体内缩 22%，保证文字与心形边缘留有视觉间距
+        const shrink = 0.78;
+        heartSafePolygon = heartPolygon.map(p => ({ x: p.x * shrink, y: p.y * shrink }));
+    }
+
+    /** 射线法点在多边形内判定 */
+    function pointInPoly(x, y, poly) {
+        let inside = false;
+        for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+            const xi = poly[i].x, yi = poly[i].y;
+            const xj = poly[j].x, yj = poly[j].y;
+            const intersect = ((yi > y) !== (yj > y)) &&
+                (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
+            if (intersect) inside = !inside;
+        }
+        return inside;
+    }
+
+    /** 检测矩形是否完全落在安全区域内（采样四角 + 四边中点 + 中心共 9 点） */
+    function rectInsideHeart(cx, cy, hw, hh, poly) {
+        if (!poly) return true;
+        const samples = [
+            [cx - hw, cy - hh], [cx + hw, cy - hh],
+            [cx - hw, cy + hh], [cx + hw, cy + hh],
+            [cx, cy - hh], [cx, cy + hh],
+            [cx - hw, cy], [cx + hw, cy],
+            [cx, cy],
+        ];
+        return samples.every(([x, y]) => pointInPoly(x, y, poly));
+    }
+
+    /** 沿拖动方向二分查找最后一个仍贴合心脏的位置（实现边界滑动） */
+    function clampToHeart(oldX, oldY, newX, newY, hw, hh, poly) {
+        if (!poly) return { x: newX, y: newY };
+        if (rectInsideHeart(newX, newY, hw, hh, poly)) return { x: newX, y: newY };
+        let lo = 0, hi = 1;
+        for (let i = 0; i < 18; i++) {
+            const mid = (lo + hi) / 2;
+            const x = oldX + (newX - oldX) * mid;
+            const y = oldY + (newY - oldY) * mid;
+            if (rectInsideHeart(x, y, hw, hh, poly)) lo = mid;
+            else hi = mid;
+        }
+        return { x: oldX + (newX - oldX) * lo, y: oldY + (newY - oldY) * lo };
     }
 
     // ============== 简易 Simplex 噪声（内嵌，避免外部依赖） ==============
@@ -191,7 +257,9 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
     let textMesh = null;
     let textTexture = null;
     let textCanvas2D = null;
-    let textFrontRatio = 1;  // 正面文字 em 高占纹理高度的比例（用于换算平面尺寸）
+    let textFrontRatio = 1;  // 文字块高度占纹理高度的比例（用于换算平面尺寸）
+    let textHalfW = 0;        // 当前文字平面半宽（供拖拽边界检测）
+    let textHalfH = 0;        // 当前文字平面半高（供拖拽边界检测）
 
     function createTextTexture() {
         if (!textCanvas2D) {
@@ -200,12 +268,16 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
         const canvas = textCanvas2D;
         const ctx = canvas.getContext("2d");
         const text = cfg.text_content || "";
+        const lines = text.split("\n");
         const fontSize = 96;
+        const lineHeight = fontSize * 1.28;
         // 立体艺术字：英文用 Georgia 粗斜体（优雅衬线感），中文优先行楷/楷体
         const font = `italic 900 ${fontSize}px Georgia, "Times New Roman", "STXingkai", "华文行楷", "KaiTi", "STKaiti", "Microsoft YaHei", sans-serif`;
 
         ctx.font = font;
-        const textWidth = ctx.measureText(text).width;
+        const lineWidths = lines.map(l => ctx.measureText(l).width);
+        const textWidth = Math.max(...lineWidths, 1);
+        const textHeight = lines.length * lineHeight;
 
         // 挤出厚度（光从左上来，厚度向右下延伸）+ 发光留白
         const depth = fontSize * 0.24;
@@ -214,7 +286,7 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
         const pad = glowPad + depth / 2;
 
         canvas.width = Math.ceil(textWidth + pad * 2);
-        canvas.height = Math.ceil(fontSize + pad * 2);
+        canvas.height = Math.ceil(textHeight + pad * 2);
 
         // 改动 canvas 尺寸会重置上下文状态，需要重新设置
         ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -226,7 +298,9 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 
         // 正面文字锚点即纹理中心（人眼以正面字形为定位基准，侧面为附属厚度）
         const cx = canvas.width / 2;
-        const cy = canvas.height / 2;
+        const textTop = (canvas.height - textHeight) / 2;
+        // 每一行的中心 Y 坐标
+        const lineY = (idx) => textTop + lineHeight * (idx + 0.5);
 
         const toCss = (c, a) => {
             const r = Math.round(THREE.MathUtils.clamp(c.r, 0, 1) * 255);
@@ -243,7 +317,9 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
         for (let i = layers; i >= 1; i--) {
             const t = i / layers;
             ctx.fillStyle = toCss(sideNear.clone().lerp(sideDeep, t));
-            ctx.fillText(text, cx + depth * t, cy + depth * t * 0.92);
+            lines.forEach((line, idx) => {
+                ctx.fillText(line, cx + depth * t, lineY(idx) + depth * t * 0.92);
+            });
         }
 
         // ② 心形色外发光
@@ -251,40 +327,42 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
         ctx.shadowColor = cfg.heart_color;
         ctx.shadowBlur = fontSize * 0.5;
         ctx.fillStyle = toCss(front);
-        ctx.fillText(text, cx, cy);
+        lines.forEach((line, idx) => ctx.fillText(line, cx, lineY(idx)));
         ctx.shadowBlur = fontSize * 0.22;
-        ctx.fillText(text, cx, cy);
+        lines.forEach((line, idx) => ctx.fillText(line, cx, lineY(idx)));
         ctx.restore();
 
-        // ③ 正面纵向渐变（上亮下暗，模拟受光圆柱面）
-        const faceGrad = ctx.createLinearGradient(0, cy - fontSize * 0.55, 0, cy + fontSize * 0.55);
+        // ③ 正面纵向渐变（上亮下暗，模拟受光圆柱面），跨整个文字块
+        const gradTop = textTop - fontSize * 0.1;
+        const gradBottom = textTop + textHeight + fontSize * 0.1;
+        const faceGrad = ctx.createLinearGradient(0, gradTop, 0, gradBottom);
         faceGrad.addColorStop(0, toCss(front.clone().lerp(new THREE.Color(0xffffff), 0.85)));
         faceGrad.addColorStop(0.42, toCss(front.clone().lerp(new THREE.Color(0xffffff), 0.12)));
         faceGrad.addColorStop(0.58, toCss(front));
         faceGrad.addColorStop(1, toCss(front.clone().multiplyScalar(0.6)));
         ctx.fillStyle = faceGrad;
-        ctx.fillText(text, cx, cy);
+        lines.forEach((line, idx) => ctx.fillText(line, cx, lineY(idx)));
 
         // ④ 深色细描边，让文字轮廓更锐利
         ctx.lineWidth = Math.max(2, fontSize * 0.025);
         ctx.strokeStyle = toCss(front.clone().multiplyScalar(0.28), 0.9);
-        ctx.strokeText(text, cx, cy);
+        lines.forEach((line, idx) => ctx.strokeText(line, cx, lineY(idx)));
 
         // ⑤ 顶部高光（玻璃/金属质感反光）
         ctx.save();
         ctx.beginPath();
-        ctx.rect(cx - textWidth / 2 - fontSize * 0.3, cy - fontSize,
-                 textWidth + fontSize * 0.6, fontSize * 0.62);
+        ctx.rect(cx - textWidth / 2 - fontSize * 0.3, textTop - fontSize,
+                 textWidth + fontSize * 0.6, textHeight + fontSize * 1.2);
         ctx.clip();
-        const hiGrad = ctx.createLinearGradient(0, cy - fontSize * 0.5, 0, cy + fontSize * 0.12);
+        const hiGrad = ctx.createLinearGradient(0, textTop - fontSize * 0.5, 0, textTop + fontSize * 0.12);
         hiGrad.addColorStop(0, "rgba(255,255,255,0)");
         hiGrad.addColorStop(1, "rgba(255,255,255,0.7)");
         ctx.fillStyle = hiGrad;
-        ctx.fillText(text, cx, cy);
+        lines.forEach((line, idx) => ctx.fillText(line, cx, lineY(idx)));
         ctx.restore();
 
-        // 记录正面 em 高占纹理比，供 rebuildText 换算平面尺寸
-        textFrontRatio = fontSize / canvas.height;
+        // 记录文字块高度占纹理比，供 rebuildText 换算平面尺寸
+        textFrontRatio = textHeight / canvas.height;
 
         if (textTexture) {
             textTexture.needsUpdate = true;
@@ -311,17 +389,27 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
         texture.colorSpace = THREE.SRGBColorSpace;
         const aspect = textCanvas2D.width / textCanvas2D.height;
 
-        // 以正面文字 em 高 0.62 世界单位为基准，并限制最大宽度（心形宽约 4.2）
-        let planeHeight = 0.62 / textFrontRatio;
+        // 基础尺寸：每行世界高度约 0.5，按行数计算总高
+        const lines = (cfg.text_content || "").split("\n");
+        let planeHeight = (lines.length * 0.5) / textFrontRatio;
         let planeWidth = planeHeight * aspect;
-        const maxWidth = 3.6;
-        if (planeWidth > maxWidth) {
-            planeWidth = maxWidth;
-            planeHeight = planeWidth / aspect;
-        }
+
         // 应用用户配置的艺术字大小倍率
         planeWidth *= cfg.text_size;
         planeHeight *= cfg.text_size;
+
+        // 心形范围内自动缩放：若当前位置放不下则等比缩小，直到贴合安全区域
+        if (heartSafePolygon) {
+            let fitScale = 1;
+            while (fitScale > 0.05) {
+                const hw = (planeWidth * fitScale) / 2;
+                const hh = (planeHeight * fitScale) / 2;
+                if (rectInsideHeart(cfg.text_x, cfg.text_y, hw, hh, heartSafePolygon)) break;
+                fitScale *= 0.9;
+            }
+            planeWidth *= fitScale;
+            planeHeight *= fitScale;
+        }
 
         const geom = new THREE.PlaneGeometry(planeWidth, planeHeight);
         const mat = new THREE.MeshBasicMaterial({
@@ -332,11 +420,14 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
         });
 
         textMesh = new THREE.Mesh(geom, mat);
-        // 文字固定在爱心视觉正中央：心形上宽下窄（两瓣+收尖），
-        // 视觉重心在包围盒中心偏上约 0.4 处；作为 heartGroup 子节点随心脏一起旋转
-        textMesh.position.set(0, 0.4, 0);
+        // 文字位置由 text_x / text_y 控制（可拖拽），作为 heartGroup 子节点随心脏一起旋转
+        textMesh.position.set(cfg.text_x, cfg.text_y, 0);
         textMesh.renderOrder = 20;
         heartGroup.add(textMesh);
+
+        // 记录当前文字平面半尺寸，供拖拽时边界检测使用
+        textHalfW = planeWidth / 2;
+        textHalfH = planeHeight / 2;
     }
 
     // ============== 粒子系统 ==============
@@ -448,7 +539,7 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
             particleMat.size = cfg.particle_size * 0.012 * (1 + pulse * 1.5);
         }
 
-        if (heartGroup && cfg.rotation_speed > 0) {
+        if (heartGroup && cfg.rotation_speed > 0 && !dragging) {
             heartGroup.rotation.y += dt * cfg.rotation_speed * 0.5;
         }
 
@@ -694,8 +785,100 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
         renderer.setSize(window.innerWidth, window.innerHeight);
     });
 
+    // ============== 文字拖拽交互 ==============
+    let dragging = false;
+    const raycaster = new THREE.Raycaster();
+    const pointer = new THREE.Vector2();
+    const dragPlane = new THREE.Plane();
+    const dragPlanePoint = new THREE.Vector3();
+    const dragNormal = new THREE.Vector3();
+    const dragOffset = new THREE.Vector2();  // 点击点相对文字中心的偏移（心脏局部坐标）
+
+    function setPointer(e) {
+        pointer.x = (e.clientX / window.innerWidth) * 2 - 1;
+        pointer.y = -(e.clientY / window.innerHeight) * 2 + 1;
+    }
+
+    function onPointerDown(e) {
+        if (IS_SHARE || !textMesh) return;
+        setPointer(e);
+        raycaster.setFromCamera(pointer, camera);
+        const hits = raycaster.intersectObject(textMesh);
+        if (hits.length === 0) return;
+
+        // 命中文字：阻止事件继续传递给 OrbitControls（避免同时触发轨道旋转）
+        e.stopImmediatePropagation();
+        e.preventDefault();
+        dragging = true;
+
+        // 以文字当前世界朝向构造拖拽平面
+        textMesh.getWorldPosition(dragPlanePoint);
+        textMesh.getWorldDirection(dragNormal);
+        dragPlane.setFromNormalAndCoplanarPoint(dragNormal, dragPlanePoint);
+
+        // 记录点击点相对文字中心的偏移（心脏局部坐标系）
+        const hitLocal = heartGroup.worldToLocal(hits[0].point.clone());
+        dragOffset.set(hitLocal.x - cfg.text_x, hitLocal.y - cfg.text_y);
+
+        renderer.domElement.style.cursor = "grabbing";
+    }
+
+    function onPointerMove(e) {
+        // 悬停时显示可抓取光标
+        if (!dragging && textMesh && !IS_SHARE) {
+            setPointer(e);
+            raycaster.setFromCamera(pointer, camera);
+            const hits = raycaster.intersectObject(textMesh);
+            renderer.domElement.style.cursor = hits.length > 0 ? "grab" : "";
+            return;
+        }
+        if (!dragging || !textMesh) return;
+
+        setPointer(e);
+        raycaster.setFromCamera(pointer, camera);
+        const hitWorld = new THREE.Vector3();
+        if (!raycaster.ray.intersectPlane(dragPlane, hitWorld)) return;
+
+        const hitLocal = heartGroup.worldToLocal(hitWorld.clone());
+        let nx = hitLocal.x - dragOffset.x;
+        let ny = hitLocal.y - dragOffset.y;
+
+        // 限制文字不超出心脏范围
+        const clamped = clampToHeart(cfg.text_x, cfg.text_y, nx, ny, textHalfW, textHalfH, heartSafePolygon);
+        cfg.text_x = clamped.x;
+        cfg.text_y = clamped.y;
+        textMesh.position.set(cfg.text_x, cfg.text_y, 0);
+        syncTextPosSliders();
+    }
+
+    /** 拖拽文字后反向同步右侧 X/Y 坐标滑块（只读分享页无此控件，判空跳过） */
+    function syncTextPosSliders() {
+        const sx = document.getElementById("text_x");
+        const sy = document.getElementById("text_y");
+        const vx = document.getElementById("text_x_val");
+        const vy = document.getElementById("text_y_val");
+        if (sx) sx.value = cfg.text_x;
+        if (sy) sy.value = cfg.text_y;
+        if (vx) vx.textContent = cfg.text_x.toFixed(2);
+        if (vy) vy.textContent = cfg.text_y.toFixed(2);
+    }
+
+    function onPointerUp() {
+        if (!dragging) return;
+        dragging = false;
+        renderer.domElement.style.cursor = "";
+        scheduleSave();
+    }
+
+    if (renderer && renderer.domElement) {
+        // pointerdown 使用捕获阶段，确保在 OrbitControls 之前拦截文字拖拽
+        renderer.domElement.addEventListener("pointerdown", onPointerDown, { capture: true });
+        renderer.domElement.addEventListener("pointermove", onPointerMove);
+        window.addEventListener("pointerup", onPointerUp);
+    }
+
     // ============== 控制面板交互 ==============
-    const fields = ["particle_count", "particle_size", "beat_speed", "spread_ratio", "rotation_speed", "text_size"];
+    const fields = ["particle_count", "particle_size", "beat_speed", "spread_ratio", "rotation_speed", "text_size", "text_x", "text_y"];
     const colorFields = ["heart_color", "background_color", "text_color"];
     const textFields = ["text_content"];
     const boolFields = ["show_text", "depth_3d", "show_fireworks"];
@@ -709,10 +892,18 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
             cfg[id] = parseFloat(el.value);
             if (id === "particle_count") rebuildParticles();
             if (id === "text_size") rebuildText();
+            if (id === "text_x" || id === "text_y") {
+                // 拖动滑块时实时移动文字（文字是心脏子节点，局部坐标随心脏一起旋转）
+                if (textMesh) textMesh.position.set(cfg.text_x, cfg.text_y, 0);
+            }
             if (id === "background_color" && scene) scene.background = new THREE.Color(cfg.background_color);
             update();
             scheduleSave();
         });
+        if (id === "text_x" || id === "text_y") {
+            // 松手后重建一次文字，按新位置重新做心形范围自适应缩放
+            el.addEventListener("change", () => { rebuildText(); });
+        }
         update();
     }
     fields.forEach(bindRangeVal);
@@ -864,6 +1055,8 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
                 text_content: "I Love You",
                 text_color: "#ffeef4",
                 text_size: 1.0,
+                text_x: 0.0,
+                text_y: 0.4,
                 depth_3d: true,
                 rotation_speed: 0.4,
                 show_fireworks: true,
@@ -915,6 +1108,7 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 
     // ============== 启动 ==============
     initThree();
+    buildHeartPolygon();
     loadConfigFromServer().finally(() => {
         scene.background = new THREE.Color(cfg.background_color);
         rebuildParticles();

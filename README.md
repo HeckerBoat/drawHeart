@@ -13,6 +13,8 @@ The heart geometry is generated in code with `THREE.Shape` + `ExtrudeGeometry`, 
 - **Mouse interaction** — move the mouse to scatter small hearts; click for a burst
 - **Fireworks** — rockets launch and burst into ring/sphere-shaped colorful sparks; toggle on/off from the panel
 - **3D art text** — the text is rendered as an extruded 3D art font centered in the heart, pulses gently with the heartbeat and rotates together with the heart
+- **Multi-line text** — the text input supports line breaks; multi-line text auto-scales to fit within the heart silhouette without overflowing
+- **Draggable text** — drag the text directly with the mouse, or fine-tune its X/Y position via the two sliders in the panel; the position is constrained to the heart shape and persisted
 - **Customizable** — color, particle count, beat speed, rotation speed, text and more, all saved to SQLite
 - **Persistent config** — settings are stored in SQLite and restored on reload
 - **Shareable read-only links** — generate a unique `/s/<token>` URL; friends cannot edit any parameters, and the page content follows the main page config in real time
@@ -66,9 +68,11 @@ All visual parameters can be tuned live in the web UI (top-right panel) and are 
 | `heart_color` | Heart particle color (HEX) |
 | `background_color` | Background color (HEX) |
 | `show_text` | Whether to display 3D art text in the center of the heart |
-| `text_content` | The text to display |
+| `text_content` | The text to display (supports multi-line, press Enter for new line) |
 | `text_color` | Text color (HEX) |
 | `text_size` | Art text size multiplier (0.5–2.0, default 1.0) |
+| `text_x` | Text X offset inside the heart (adjustable by dragging or the X slider) |
+| `text_y` | Text Y offset inside the heart (adjustable by dragging or the Y slider) |
 | `depth_3d` | Enable 3D rotating heart |
 | `rotation_speed` | 3D rotation speed (rad/s) |
 | `show_fireworks` | Whether to enable the fireworks effect |

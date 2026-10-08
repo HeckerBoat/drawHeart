@@ -31,12 +31,16 @@ class HeartConfig(SQLModel, table=True):
     spread_ratio: float = Field(default=1.0, ge=0.5, le=2.0)
     # 显示文字
     show_text: bool = Field(default=True)
-    # 文字内容
-    text_content: str = Field(default="I Love You", max_length=64)
+    # 文字内容（支持多行）
+    text_content: str = Field(default="I Love You", max_length=300)
     # 文字颜色
     text_color: str = Field(default="#ffffff", max_length=9)
     # 文字大小倍率（1.0 为默认大小，0.5-2.0）
     text_size: float = Field(default=1.0, ge=0.5, le=2.0)
+    # 文字在心脏局部坐标系中的 X 偏移（可拖拽调整，单位：世界坐标）
+    text_x: float = Field(default=0.0)
+    # 文字在心脏局部坐标系中的 Y 偏移（可拖拽调整，单位：世界坐标）
+    text_y: float = Field(default=0.4)
     # 是否启用 3D 心形
     depth_3d: bool = Field(default=False)
     # 3D 旋转速度（弧度/秒）
@@ -62,6 +66,8 @@ class HeartConfig(SQLModel, table=True):
             "text_content": self.text_content,
             "text_color": self.text_color,
             "text_size": self.text_size,
+            "text_x": self.text_x,
+            "text_y": self.text_y,
             "depth_3d": self.depth_3d,
             "rotation_speed": self.rotation_speed,
             "show_fireworks": self.show_fireworks,
