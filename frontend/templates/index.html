@@ -16,8 +16,7 @@
     </div>
 
     {% if readonly %}
-    <!-- 只读分享模式：不渲染控制面板，仅显示只读标识 -->
-    <div class="share-badge">分享链接 · 仅供观赏，无法修改参数</div>
+    <!-- 只读分享模式：不渲染控制面板 -->
     {% else %}
     <!-- 控制面板 -->
     <aside class="panel" id="control-panel">
@@ -61,6 +60,11 @@
             <div class="form-row">
                 <label for="text_color">文字颜色</label>
                 <input type="color" id="text_color" />
+            </div>
+            <div class="form-row">
+                <label for="text_size">文字大小</label>
+                <input type="range" id="text_size" min="0.5" max="2" step="0.05" />
+                <span class="val" id="text_size_val"></span>
             </div>
             <div class="form-row switch-row">
                 <label for="show_text">显示文字</label>

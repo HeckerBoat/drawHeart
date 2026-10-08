@@ -68,6 +68,7 @@ All visual parameters can be tuned live in the web UI (top-right panel) and are 
 | `show_text` | Whether to display 3D art text in the center of the heart |
 | `text_content` | The text to display |
 | `text_color` | Text color (HEX) |
+| `text_size` | Art text size multiplier (0.5–2.0, default 1.0) |
 | `depth_3d` | Enable 3D rotating heart |
 | `rotation_speed` | 3D rotation speed (rad/s) |
 | `show_fireworks` | Whether to enable the fireworks effect |

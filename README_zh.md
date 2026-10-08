@@ -68,6 +68,7 @@ waitress-serve --listen=0.0.0.0:8000 app:app
 | `show_text` | 是否在爱心正中央显示立体艺术文字 |
 | `text_content` | 显示的文字内容 |
 | `text_color` | 文字颜色（HEX） |
+| `text_size` | 艺术字大小倍率（0.5–2.0，默认 1.0） |
 | `depth_3d` | 是否启用 3D 旋转心形 |
 | `rotation_speed` | 3D 旋转速度（弧度/秒） |
 | `show_fireworks` | 是否启用烟花特效 |

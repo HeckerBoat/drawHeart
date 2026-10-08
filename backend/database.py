@@ -63,12 +63,24 @@ def _migrate_heartconfig_fireworks() -> None:
             print("[INFO] 已迁移 heartconfig 表：新增 show_fireworks 列")
 
 
+def _migrate_heartconfig_text_size() -> None:
+    """兼容旧库：为 HeartConfig 表新增艺术字大小倍率列（不存在时）。"""
+    with Session(engine) as session:
+        conn = session.connection()
+        cols = {row[1] for row in conn.execute(text("PRAGMA table_info(heartconfig)")).fetchall()}
+        if "text_size" not in cols:
+            conn.execute(text("ALTER TABLE heartconfig ADD COLUMN text_size FLOAT DEFAULT 1.0"))
+            session.commit()
+            print("[INFO] 已迁移 heartconfig 表：新增 text_size 列")
+
+
 def init_db() -> None:
     """初始化数据库：创建所有表、迁移旧表结构并写入默认配置。"""
     SQLModel.metadata.create_all(engine)
     _migrate_legacy_sharelink()
     _migrate_heartconfig_3d()
     _migrate_heartconfig_fireworks()
+    _migrate_heartconfig_text_size()
 
     # 写入默认配置（如果不存在）
     with Session(engine) as session:
@@ -106,8 +118,8 @@ def save_config(data: dict) -> dict:
         allowed = {
             "particle_count", "heart_color", "background_color",
             "beat_speed", "text_content", "show_text", "text_color",
-            "particle_size", "spread_ratio", "depth_3d", "rotation_speed",
-            "show_fireworks",
+            "text_size", "particle_size", "spread_ratio", "depth_3d",
+            "rotation_speed", "show_fireworks",
         }
         for key, value in data.items():
             if key in allowed:

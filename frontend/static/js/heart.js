@@ -31,6 +31,7 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
         show_text: true,
         text_content: "I Love You",
         text_color: "#ffeef4",
+        text_size: 1.0,
         depth_3d: true,
         rotation_speed: 0.4,
         show_fireworks: true,
@@ -318,6 +319,9 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
             planeWidth = maxWidth;
             planeHeight = planeWidth / aspect;
         }
+        // 应用用户配置的艺术字大小倍率
+        planeWidth *= cfg.text_size;
+        planeHeight *= cfg.text_size;
 
         const geom = new THREE.PlaneGeometry(planeWidth, planeHeight);
         const mat = new THREE.MeshBasicMaterial({
@@ -691,7 +695,7 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
     });
 
     // ============== 控制面板交互 ==============
-    const fields = ["particle_count", "particle_size", "beat_speed", "spread_ratio", "rotation_speed"];
+    const fields = ["particle_count", "particle_size", "beat_speed", "spread_ratio", "rotation_speed", "text_size"];
     const colorFields = ["heart_color", "background_color", "text_color"];
     const textFields = ["text_content"];
     const boolFields = ["show_text", "depth_3d", "show_fireworks"];
@@ -704,6 +708,7 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
         el.addEventListener("input", () => {
             cfg[id] = parseFloat(el.value);
             if (id === "particle_count") rebuildParticles();
+            if (id === "text_size") rebuildText();
             if (id === "background_color" && scene) scene.background = new THREE.Color(cfg.background_color);
             update();
             scheduleSave();
@@ -858,6 +863,7 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
                 show_text: true,
                 text_content: "I Love You",
                 text_color: "#ffeef4",
+                text_size: 1.0,
                 depth_3d: true,
                 rotation_speed: 0.4,
                 show_fireworks: true,
