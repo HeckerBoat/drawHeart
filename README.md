@@ -11,6 +11,7 @@ The heart geometry is generated in code with `THREE.Shape` + `ExtrudeGeometry`, 
 - **Simplex noise drift** — particles wiggle organically on the heart surface
 - **Auto-rotation & orbit controls** — the heart rotates automatically; drag to rotate, scroll to zoom
 - **Mouse interaction** — move the mouse to scatter small hearts; click for a burst
+- **Fireworks** — rockets launch and burst into ring/sphere-shaped colorful sparks; toggle on/off from the panel
 - **3D art text** — the text is rendered as an extruded 3D art font centered in the heart, pulses gently with the heartbeat and rotates together with the heart
 - **Customizable** — color, particle count, beat speed, rotation speed, text and more, all saved to SQLite
 - **Persistent config** — settings are stored in SQLite and restored on reload
@@ -69,6 +70,7 @@ All visual parameters can be tuned live in the web UI (top-right panel) and are 
 | `text_color` | Text color (HEX) |
 | `depth_3d` | Enable 3D rotating heart |
 | `rotation_speed` | 3D rotation speed (rad/s) |
+| `show_fireworks` | Whether to enable the fireworks effect |
 
 ## Share a Read-Only Link
 

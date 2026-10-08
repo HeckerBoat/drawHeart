@@ -7,7 +7,8 @@
  * 3. 粒子跟随心脏脉动，带 Simplex 噪声自然蠕动
  * 4. OrbitControls 鼠标交互旋转/缩放
  * 5. 鼠标移动洒落星光、点击绽放爱心
- * 6. 与后端配置同步：从 /api/config 读取参数，修改后保存
+ * 6. 烟花特效：火箭升空爆炸绽放，可由配置开关启停
+ * 7. 与后端配置同步：从 /api/config 读取参数，修改后保存
  */
 import * as THREE from "three";
 import { MeshSurfaceSampler } from "three/addons/math/MeshSurfaceSampler.js";
@@ -32,6 +33,7 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
         text_color: "#ffeef4",
         depth_3d: true,
         rotation_speed: 0.4,
+        show_fireworks: true,
     };
 
     // ============== 颜色工具 ==============
@@ -455,6 +457,7 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
         renderer.render(scene, camera);
 
         drawFlySprites(dt);
+        updateFireworks(dt, t);
     }
 
     // ============== 鼠标飞散粒子（2D Canvas 叠加层） ==============
@@ -543,6 +546,122 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
         flyCtx.restore();
     }
 
+    // ============== 烟花特效（2D 叠加层，随 show_fireworks 开关启停） ==============
+    const fireworksRockets = [];  // 上升中的火箭
+    const fireworksSparks = [];   // 爆炸后的火花
+    let nextFireworkTime = 0.8;   // 下次发射时刻（秒）
+
+    // 烟花主色调：偏暖（玫红/金色）为主，偶发随机色，与心形主题呼应
+    function fireworkHue() {
+        const r = Math.random();
+        if (r < 0.4) return 320 + Math.random() * 40;  // 玫红/粉
+        if (r < 0.7) return 25 + Math.random() * 35;   // 金/橙
+        return Math.random() * 360;                     // 随机彩色
+    }
+
+    function launchFirework() {
+        fireworksRockets.push({
+            x: window.innerWidth * (0.12 + Math.random() * 0.76),
+            y: window.innerHeight + 12,
+            vx: (Math.random() - 0.5) * 1.2,
+            vy: -(9 + Math.random() * 4),
+            targetY: window.innerHeight * (0.14 + Math.random() * 0.32),
+            hue: fireworkHue(),
+        });
+    }
+
+    function explodeFirework(r) {
+        const count = 60 + Math.floor(Math.random() * 50);
+        const isRing = Math.random() < 0.4;  // 环形（整齐）或球形（随机）绽放
+        for (let i = 0; i < count; i++) {
+            let angle, speed;
+            if (isRing) {
+                angle = (i / count) * Math.PI * 2 + Math.random() * 0.05;
+                speed = 3.8 + Math.random() * 0.8;
+            } else {
+                angle = Math.random() * Math.PI * 2;
+                speed = Math.pow(Math.random(), 0.6) * 5.2;
+            }
+            fireworksSparks.push({
+                x: r.x, y: r.y,
+                vx: Math.cos(angle) * speed + r.vx,
+                vy: Math.sin(angle) * speed + r.vy * 0.3,
+                life: 1.0,
+                decay: 0.008 + Math.random() * 0.012,
+                size: 1.2 + Math.random() * 1.6,
+                hue: r.hue + (Math.random() - 0.5) * 50,
+                phase: Math.random() * Math.PI * 2,
+            });
+        }
+    }
+
+    function updateFireworks(dt, t) {
+        const step = dt * 60;
+        const ctx = flyCtx;
+
+        // 发射调度：关闭开关后不再发射，存量火花自然熄灭淡出
+        if (cfg.show_fireworks && t >= nextFireworkTime && fireworksSparks.length < 1600) {
+            const burst = 1 + (Math.random() < 0.3 ? 1 : 0) + (Math.random() < 0.12 ? 1 : 0);
+            for (let i = 0; i < burst; i++) launchFirework();
+            nextFireworkTime = t + 1.1 + Math.random() * 1.4;
+        }
+
+        ctx.globalCompositeOperation = "lighter";
+
+        // 火箭：上升、到顶爆炸
+        for (let i = fireworksRockets.length - 1; i >= 0; i--) {
+            const r = fireworksRockets[i];
+            r.x += r.vx * step;
+            r.y += r.vy * step;
+            r.vy += 0.05 * step;
+
+            if (r.y <= r.targetY || r.vy >= -1.2) {
+                explodeFirework(r);
+                fireworksRockets.splice(i, 1);
+                continue;
+            }
+
+            // 头部亮斑 + 尾焰
+            ctx.strokeStyle = `hsla(${r.hue}, 100%, 75%, 0.9)`;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(r.x - r.vx * 3, r.y - r.vy * 3);
+            ctx.lineTo(r.x, r.y);
+            ctx.stroke();
+            ctx.fillStyle = "rgba(255,255,255,0.9)";
+            ctx.beginPath();
+            ctx.arc(r.x, r.y, 1.6, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        // 火花：重力下坠 + 空气阻力 + 闪烁淡出
+        for (let i = fireworksSparks.length - 1; i >= 0; i--) {
+            const s = fireworksSparks[i];
+            s.x += s.vx * step;
+            s.y += s.vy * step;
+            s.vy += 0.045 * step;
+            const drag = Math.pow(0.982, step);
+            s.vx *= drag;
+            s.vy *= drag;
+            s.life -= s.decay * step;
+            if (s.life <= 0) { fireworksSparks.splice(i, 1); continue; }
+
+            const twinkle = 0.55 + 0.45 * Math.sin(t * 12 + s.phase);
+            const alpha = Math.max(0, s.life) * twinkle;
+            // 外圈柔光 + 内核亮斑
+            ctx.fillStyle = `hsla(${s.hue}, 100%, 62%, ${alpha * 0.35})`;
+            ctx.beginPath();
+            ctx.arc(s.x, s.y, s.size * 2.2, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = `hsla(${s.hue}, 100%, ${Math.round(68 + 25 * twinkle)}%, ${alpha})`;
+            ctx.beginPath();
+            ctx.arc(s.x, s.y, s.size, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        ctx.globalCompositeOperation = "source-over";
+    }
+
 
 
 
@@ -575,7 +694,7 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
     const fields = ["particle_count", "particle_size", "beat_speed", "spread_ratio", "rotation_speed"];
     const colorFields = ["heart_color", "background_color", "text_color"];
     const textFields = ["text_content"];
-    const boolFields = ["show_text", "depth_3d"];
+    const boolFields = ["show_text", "depth_3d", "show_fireworks"];
 
     function bindRangeVal(id) {
         const el = document.getElementById(id);
@@ -741,6 +860,7 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
                 text_color: "#ffeef4",
                 depth_3d: true,
                 rotation_speed: 0.4,
+                show_fireworks: true,
             };
             Object.assign(cfg, defaults);
             applyCfgToUI();
